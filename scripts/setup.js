@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -36,6 +36,10 @@ function run(command, options = {}) {
   });
 }
 
+function shouldRequireRealAxl() {
+  return process.env.REQUIRE_REAL_AXL === "true";
+}
+
 function resolveAxlDownloadUrl() {
   const platform = platformMap[process.platform];
   const arch = archMap[process.arch] ?? process.arch;
@@ -52,6 +56,27 @@ function resolveAxlDownloadUrl() {
   return `${baseUrl}/axl-client-${platform}-${arch}${extension}`;
 }
 
+function createAxlShim(downloadUrl) {
+  const shim = `#!/usr/bin/env bash
+set -euo pipefail
+
+echo "[pookie axl shim] Real Gensyn AXL binary was not available during setup."
+echo "[pookie axl shim] Original download URL: ${downloadUrl}"
+echo "[pookie axl shim] Args: $*"
+echo "[pookie axl shim] Mock mesh online. Forward target should be http://localhost:8080/mcp/execute"
+
+trap 'echo "[pookie axl shim] shutting down"; exit 0' INT TERM
+
+while true; do
+  echo "[pookie axl shim] heartbeat: waiting for mesh tasks"
+  sleep 30
+done
+`;
+
+  writeFileSync(axlBinary, shim, { mode: 0o755 });
+  run(`chmod +x ${shellQuote(axlBinary)}`);
+}
+
 function installAxl() {
   mkdirSync(axlDir, { recursive: true });
   const downloadUrl = resolveAxlDownloadUrl();
@@ -62,14 +87,25 @@ function installAxl() {
     run(`curl -fL ${shellQuote(downloadUrl)} -o ${shellQuote(axlBinary)}`);
     run(`chmod +x ${shellQuote(axlBinary)}`);
   } catch (error) {
-    throw new Error(
-      [
-        "Failed to download the Gensyn AXL binary.",
-        `Tried: ${downloadUrl}`,
-        "If no release binary exists yet, download/build AXL manually and place it at bin/axl-core/axl-client,",
-        "or rerun with AXL_RELEASE_BASE_URL pointing at a release that contains axl-client-{platform}-{arch}."
-      ].join("\n")
-    );
+    if (existsSync(axlBinary)) {
+      unlinkSync(axlBinary);
+    }
+
+    if (shouldRequireRealAxl()) {
+      throw new Error(
+        [
+          "Failed to download the Gensyn AXL binary.",
+          `Tried: ${downloadUrl}`,
+          "If no release binary exists yet, download/build AXL manually and place it at bin/axl-core/axl-client,",
+          "or rerun with AXL_RELEASE_BASE_URL pointing at a release that contains axl-client-{platform}-{arch}."
+        ].join("\n")
+      );
+    }
+
+    console.warn("Failed to download the Gensyn AXL binary; creating a local hackathon shim instead.");
+    console.warn(`Tried: ${downloadUrl}`);
+    console.warn("Set REQUIRE_REAL_AXL=true to fail setup instead of using the shim.");
+    createAxlShim(downloadUrl);
   }
 }
 
@@ -85,7 +121,7 @@ function installPythonAgent() {
 
   writeFileSync(
     requirementsPath,
-    ["browser-use", "langchain-openai", "python-dotenv", ""].join("\n")
+    ["browser-use", "langchain-openai", "python-dotenv", "playwright", ""].join("\n")
   );
 
   const venvPython =

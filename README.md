@@ -26,7 +26,8 @@ PAYOUT_ADDRESS=0x0000000000000000000000000000000000000000
 
 ## What Runs
 
-- `npm run setup` downloads the Gensyn AXL binary into `bin/axl-core/axl-client`, creates `python-agent/venv`, installs `browser-use`, `langchain-openai`, `python-dotenv`, and installs Playwright Chromium.
+- `npm run setup` tries to download the Gensyn AXL binary into `bin/axl-core/axl-client`. Because the public AXL repo currently has no release binaries, setup falls back to a local hackathon shim unless `REQUIRE_REAL_AXL=true` is set.
+- `npm run setup` also creates `python-agent/venv`, installs `browser-use`, `langchain-openai`, `python-dotenv`, and installs Playwright Chromium.
 - `npm start` launches the local Express orchestrator on `http://localhost:8080` and starts AXL with the hackathon flags:
 
 ```bash
@@ -83,7 +84,8 @@ Successful responses look like:
 
 ## Troubleshooting
 
-- **`npm run setup` fails downloading AXL:** The default URL is a placeholder release path: `https://github.com/gensyn-ai/axl/releases/latest/download/axl-client-{platform}-{arch}`. If no release binary exists, build/download AXL manually and place it at `bin/axl-core/axl-client`, or rerun with `AXL_RELEASE_BASE_URL` pointing to a compatible release.
+- **`npm run setup` cannot download AXL:** The default URL is a placeholder release path: `https://github.com/gensyn-ai/axl/releases/latest/download/axl-client-{platform}-{arch}`. Since the public AXL repo currently has no release binaries, setup creates a local shim so the demo can still boot. To require a real binary, run `REQUIRE_REAL_AXL=true npm run setup`.
+- **Using a real AXL binary:** Build/download AXL manually and place it at `bin/axl-core/axl-client`, or rerun with `AXL_RELEASE_BASE_URL` pointing to a compatible release.
 - **`npm start` says Python venv is missing:** Run `npm run setup`. If AXL download failed first, create the venv manually with `python3 -m venv python-agent/venv`, install `python-agent/requirements.txt`, and run `python-agent/venv/bin/python3 -m playwright install chromium`.
 - **Browser task fails immediately:** Confirm `.env` contains `ZEROG_API_KEY` and `ZEROG_MODEL`.
 - **Playwright complains Chromium is missing:** Run `python-agent/venv/bin/python3 -m playwright install chromium`.
