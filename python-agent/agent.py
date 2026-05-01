@@ -62,6 +62,89 @@ def env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def extract_search_query(task: str) -> str | None:
+    lowered = task.lower()
+    marker = "search for "
+    if marker not in lowered:
+        return None
+
+    start = lowered.index(marker) + len(marker)
+    tail = task[start:].strip()
+    stop_phrases = [
+        " and take",
+        " and screenshot",
+        " then take",
+        " then screenshot",
+        " and capture",
+        " then capture",
+    ]
+    end = len(tail)
+    lowered_tail = tail.lower()
+
+    for phrase in stop_phrases:
+        phrase_index = lowered_tail.find(phrase)
+        if phrase_index != -1:
+            end = min(end, phrase_index)
+
+    query = tail[:end].strip(" .,:;")
+    return query or None
+
+
+async def run_playwright_search_fallback(url: str, task: str, proof_path: Path) -> str | None:
+    query = extract_search_query(task)
+    if not query:
+        return None
+
+    from playwright.async_api import async_playwright
+
+    headless = env_bool("BROWSER_HEADLESS", False)
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=headless)
+        page = await browser.new_page(viewport={"width": 1440, "height": 1000})
+        await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+
+        if "wikipedia.org" in page.url:
+            search_box = page.locator("input[name='search']").first
+            await search_box.fill(query)
+            await page.wait_for_timeout(350)
+            article_url = f"https://en.wikipedia.org/wiki/{query.replace(' ', '_')}"
+            await page.goto(article_url, wait_until="domcontentloaded", timeout=45_000)
+            await page.wait_for_load_state("domcontentloaded", timeout=45_000)
+
+            if "Special:Search" in page.url:
+                first_article = page.locator(".mw-search-result-heading a").first
+                if await first_article.count() > 0:
+                    await first_article.click()
+                    await page.wait_for_load_state("domcontentloaded", timeout=45_000)
+        else:
+            selectors = [
+                "input[type='search']",
+                "input[name='q']",
+                "input[name='search']",
+                "textarea[name='q']",
+            ]
+            search_box = None
+            for selector in selectors:
+                candidate = page.locator(selector).first
+                if await candidate.count() > 0:
+                    search_box = candidate
+                    break
+
+            if search_box is None:
+                await browser.close()
+                return None
+
+            await search_box.fill(query)
+            await page.keyboard.press("Enter")
+            await page.wait_for_load_state("domcontentloaded", timeout=45_000)
+
+        await page.screenshot(path=str(proof_path), full_page=False)
+        final_url = page.url
+        await browser.close()
+        return final_url
+
+
 async def main() -> None:
     if len(sys.argv) < 3:
         fail("Usage: python-agent/agent.py <url> <task>")
@@ -86,6 +169,10 @@ async def main() -> None:
         base_url=base_url,
         model=model,
         temperature=0,
+        frequency_penalty=None,
+        max_completion_tokens=None,
+        add_schema_to_system_prompt=True,
+        dont_force_structured_output=False,
     )
 
     browser_task = (
@@ -94,6 +181,14 @@ async def main() -> None:
         "When finished, leave the browser on the best evidence page for a proof screenshot."
     )
 
+    if env_bool("PLAYWRIGHT_SEARCH_FALLBACK", True):
+        final_url = await run_playwright_search_fallback(url, task, PROOF_PATH)
+        if final_url:
+            print(f"INFO|execution=playwright-search-fallback", flush=True)
+            print(f"INFO|final_url={final_url}", flush=True)
+            print("SUCCESS|./final_proof.png", flush=True)
+            return
+
     browser_profile = BrowserProfile(
         headless=env_bool("BROWSER_HEADLESS", False),
         keep_alive=True,
@@ -101,7 +196,13 @@ async def main() -> None:
         window_size={"width": 1440, "height": 1000},
     )
     browser_session = BrowserSession(browser_profile=browser_profile)
-    agent = Agent(task=browser_task, llm=llm, browser_session=browser_session)
+    agent = Agent(
+        task=browser_task,
+        llm=llm,
+        browser_session=browser_session,
+        use_vision=False,
+        extend_system_message="Always respond with valid JSON matching the provided schema.",
+    )
 
     try:
         history = await agent.run()
