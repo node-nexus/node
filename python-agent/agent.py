@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 
 from browser_use import Agent, ChatOpenAI
+from browser_use.browser.profile import BrowserProfile
+from browser_use.browser.session import BrowserSession
 from dotenv import load_dotenv
 
 
@@ -24,64 +26,32 @@ async def maybe_await(value):
     return value
 
 
-async def try_browser_use_screenshot(agent: Agent, proof_path: Path) -> bool:
-    """Best-effort screenshot across browser-use versions."""
-    candidates = [
-        getattr(agent, "browser_session", None),
-        getattr(agent, "browser", None),
-    ]
+async def capture_final_screenshot(browser_session: BrowserSession, proof_path: Path) -> str:
+    """Capture the final page controlled by browser-use, not a freshly opened URL."""
+    await maybe_await(browser_session.take_screenshot(path=str(proof_path), full_page=True))
 
-    for candidate in candidates:
-        if candidate is None:
-            continue
+    if not proof_path.exists():
+        fail("Browser task completed, but final screenshot was not written")
 
-        for method_name in ("take_screenshot", "screenshot"):
-            method = getattr(candidate, method_name, None)
-            if method is None:
-                continue
-
-            try:
-                await maybe_await(method(path=str(proof_path)))
-                return proof_path.exists()
-            except TypeError:
-                try:
-                    await maybe_await(method(str(proof_path)))
-                    return proof_path.exists()
-                except Exception:
-                    continue
-            except Exception:
-                continue
-
-        for page_attr in ("current_page", "page"):
-            page = getattr(candidate, page_attr, None)
-            if callable(page):
-                try:
-                    page = await maybe_await(page())
-                except Exception:
-                    page = None
-
-            screenshot = getattr(page, "screenshot", None)
-            if screenshot is None:
-                continue
-
-            try:
-                await maybe_await(screenshot(path=str(proof_path), full_page=True))
-                return proof_path.exists()
-            except Exception:
-                continue
-
-    return False
+    try:
+        return await maybe_await(browser_session.get_current_page_url())
+    except Exception:
+        return "unknown"
 
 
-async def fallback_playwright_screenshot(url: str, proof_path: Path) -> None:
-    from playwright.async_api import async_playwright
+def summarize_agent_failure(history) -> str:
+    errors = [error for error in history.errors() if error]
+    if errors:
+        return errors[-1]
 
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
-        page = await browser.new_page(viewport={"width": 1440, "height": 1000})
-        await page.goto(url, wait_until="networkidle", timeout=45_000)
-        await page.screenshot(path=str(proof_path), full_page=True)
-        await browser.close()
+    if history.is_done() is False:
+        return "Agent stopped before marking the task as done"
+
+    success = history.is_successful()
+    if success is False:
+        return "Agent completed but judged the task unsuccessful"
+
+    return "Agent did not produce a successful completion"
 
 
 async def main() -> None:
@@ -115,15 +85,27 @@ async def main() -> None:
         "When finished, leave the browser on the best evidence page for a proof screenshot."
     )
 
-    agent = Agent(task=browser_task, llm=llm)
+    browser_profile = BrowserProfile(
+        headless=True,
+        keep_alive=True,
+        viewport={"width": 1440, "height": 1000},
+    )
+    browser_session = BrowserSession(browser_profile=browser_profile)
+    agent = Agent(task=browser_task, llm=llm, browser_session=browser_session)
 
     try:
-        await agent.run()
+        history = await agent.run()
+        is_successful = history.is_successful()
 
-        if not await try_browser_use_screenshot(agent, PROOF_PATH):
-            await fallback_playwright_screenshot(url, PROOF_PATH)
+        if history.is_done() is not True or is_successful is False:
+            fail(summarize_agent_failure(history))
+
+        final_url = await capture_final_screenshot(browser_session, PROOF_PATH)
+        print(f"INFO|final_url={final_url}", flush=True)
     except Exception as error:
         fail(str(error))
+    finally:
+        await maybe_await(browser_session.stop())
 
     print("SUCCESS|./final_proof.png", flush=True)
 

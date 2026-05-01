@@ -47,6 +47,31 @@ function logStep(requestId, step, status, details = {}) {
   });
 }
 
+function parsePythonInfo(stdout) {
+  return Object.fromEntries(
+    stdout
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("INFO|"))
+      .map((line) => line.slice("INFO|".length))
+      .map((entry) => {
+        const separatorIndex = entry.indexOf("=");
+        if (separatorIndex === -1) {
+          return [entry, true];
+        }
+
+        return [entry.slice(0, separatorIndex), entry.slice(separatorIndex + 1)];
+      })
+  );
+}
+
+function parsePythonError(stdout) {
+  return stdout
+    .split(/\r?\n/)
+    .find((line) => line.startsWith("ERROR|"))
+    ?.slice("ERROR|".length)
+    .trim();
+}
+
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
@@ -117,13 +142,14 @@ function runPythonAgent({ url, task, requestId }) {
       },
       (error, stdout, stderr) => {
         if (error) {
+          const pythonError = parsePythonError(stdout);
           const details = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
           logStep(requestId, "python-agent", "fail", {
-            error: truncate(details || error.message),
+            error: truncate(pythonError || details || error.message),
             exitCode: error.code ?? null,
             signal: error.signal ?? null
           });
-          reject(new Error(details || error.message));
+          reject(new Error(pythonError || details || error.message));
           return;
         }
 
@@ -141,12 +167,15 @@ function runPythonAgent({ url, task, requestId }) {
         }
 
         const proofPath = successLine.slice("SUCCESS|".length).trim();
+        const info = parsePythonInfo(stdout);
         logStep(requestId, "python-agent", "success", {
           proofPath,
+          ...info,
           stderr: stderr.trim() ? truncate(stderr.trim()) : undefined
         });
         resolve({
           proofPath,
+          info,
           stdout,
           stderr
         });
