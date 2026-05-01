@@ -8,7 +8,7 @@
   },
   "scripts": {
     "setup": "node scripts/setup.js",
-    "start": "pookie-node"
+    "start": "node bin/pookie.js"
   },
   "keywords": [
     "web3",
