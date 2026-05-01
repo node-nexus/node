@@ -54,6 +54,14 @@ def summarize_agent_failure(history) -> str:
     return "Agent did not produce a successful completion"
 
 
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 async def main() -> None:
     if len(sys.argv) < 3:
         fail("Usage: python-agent/agent.py <url> <task>")
@@ -86,9 +94,10 @@ async def main() -> None:
     )
 
     browser_profile = BrowserProfile(
-        headless=True,
+        headless=env_bool("BROWSER_HEADLESS", False),
         keep_alive=True,
         viewport={"width": 1440, "height": 1000},
+        window_size={"width": 1440, "height": 1000},
     )
     browser_session = BrowserSession(browser_profile=browser_profile)
     agent = Agent(task=browser_task, llm=llm, browser_session=browser_session)

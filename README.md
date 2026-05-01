@@ -21,6 +21,7 @@ ENS_IDENTITY=your-node.eth
 ZEROG_API_KEY=your_0g_router_api_key
 ZEROG_PRIVATE_KEY=your_0g_storage_private_key
 ZEROG_MODEL=your_0g_model_name
+BROWSER_HEADLESS=false
 PAYOUT_ADDRESS=0x0000000000000000000000000000000000000000
 ```
 
@@ -88,5 +89,6 @@ Successful responses look like:
 - **Using a real AXL binary:** Build/download AXL manually and place it at `bin/axl-core/axl-client`, or rerun with `AXL_RELEASE_BASE_URL` pointing to a compatible release.
 - **`npm start` says Python venv is missing:** Run `npm run setup`. If AXL download failed first, create the venv manually with `python3 -m venv python-agent/venv`, install `python-agent/requirements.txt`, and run `python-agent/venv/bin/python3 -m playwright install chromium`.
 - **Browser task fails immediately:** Confirm `.env` contains `ZEROG_API_KEY` and `ZEROG_MODEL`.
+- **Browser window does not appear:** By default the Python agent runs with a visible Chromium window. Set `BROWSER_HEADLESS=false` in `.env` for demos, or `BROWSER_HEADLESS=true` for background/headless runs.
 - **Playwright complains Chromium is missing:** Run `python-agent/venv/bin/python3 -m playwright install chromium`.
 - **AXL rejects CLI flags:** Replace the hackathon flag spawn in `bin/pookie.js` with the config/router mode described in the Gensyn AXL docs once the exact binary release shape is finalized.
