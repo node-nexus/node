@@ -19,6 +19,34 @@ const venvPython =
     ? path.join(projectRoot, "python-agent", "venv", "Scripts", "python.exe")
     : path.join(projectRoot, "python-agent", "venv", "bin", "python3");
 
+function truncate(value, maxLength = 500) {
+  const text = String(value ?? "");
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function logEvent({ requestId, event, step, status, details = {} }) {
+  console.log(
+    JSON.stringify({
+      time: new Date().toISOString(),
+      requestId,
+      event,
+      step,
+      status,
+      ...details
+    })
+  );
+}
+
+function logStep(requestId, step, status, details = {}) {
+  logEvent({
+    requestId,
+    event: "step",
+    step,
+    status,
+    details
+  });
+}
+
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
@@ -52,9 +80,13 @@ function verifyX402PaymentStub({ url, task, x402_sig }) {
   }
 }
 
-function runPythonAgent({ url, task }) {
+function runPythonAgent({ url, task, requestId }) {
   return new Promise((resolve, reject) => {
     if (!existsSync(venvPython)) {
+      logStep(requestId, "python-agent", "fail", {
+        reason: "missing-venv",
+        venvPython
+      });
       reject(
         new Error(
           `Python virtual environment not found at ${venvPython}. Run npm run setup first.`
@@ -70,6 +102,11 @@ function runPythonAgent({ url, task }) {
       shellQuote(task)
     ].join(" ");
 
+    logStep(requestId, "python-agent", "start", {
+      agentPath,
+      timeoutMs: 10 * 60 * 1000
+    });
+
     exec(
       command,
       {
@@ -81,6 +118,11 @@ function runPythonAgent({ url, task }) {
       (error, stdout, stderr) => {
         if (error) {
           const details = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
+          logStep(requestId, "python-agent", "fail", {
+            error: truncate(details || error.message),
+            exitCode: error.code ?? null,
+            signal: error.signal ?? null
+          });
           reject(new Error(details || error.message));
           return;
         }
@@ -90,11 +132,19 @@ function runPythonAgent({ url, task }) {
           .find((line) => line.startsWith("SUCCESS|"));
 
         if (!successLine) {
+          logStep(requestId, "python-agent", "fail", {
+            reason: "missing-success-marker",
+            stdout: truncate(stdout)
+          });
           reject(new Error(`Python agent did not return SUCCESS marker. stdout: ${stdout}`));
           return;
         }
 
         const proofPath = successLine.slice("SUCCESS|".length).trim();
+        logStep(requestId, "python-agent", "success", {
+          proofPath,
+          stderr: stderr.trim() ? truncate(stderr.trim()) : undefined
+        });
         resolve({
           proofPath,
           stdout,
@@ -105,7 +155,11 @@ function runPythonAgent({ url, task }) {
   });
 }
 
-async function uploadToZeroGStorageStub({ proofPath }) {
+async function uploadToZeroGStorageStub({ proofPath, requestId }) {
+  logStep(requestId, "0g-upload", "start", {
+    proofPath
+  });
+
   // TODO: Replace with the real 0G Storage client upload. The timestamp keeps
   // each proof unique while still looking like a content-addressed artifact.
   const digest = crypto
@@ -113,7 +167,13 @@ async function uploadToZeroGStorageStub({ proofPath }) {
     .update(`${proofPath}:${Date.now()}:${process.env.ZEROG_PRIVATE_KEY ?? ""}`)
     .digest("hex");
 
-  return `0g://${digest}`;
+  const proofHash = `0g://${digest}`;
+
+  logStep(requestId, "0g-upload", "success", {
+    proofHash
+  });
+
+  return proofHash;
 }
 
 export function createApp() {
@@ -121,7 +181,41 @@ export function createApp() {
 
   app.use(express.json({ limit: "1mb" }));
 
-  app.get("/health", (_request, response) => {
+  app.use((request, response, next) => {
+    const requestId = crypto.randomUUID();
+    const startedAt = Date.now();
+    request.requestId = requestId;
+
+    logEvent({
+      requestId,
+      event: "request",
+      status: "received",
+      details: {
+        method: request.method,
+        path: request.path,
+        ip: request.ip
+      }
+    });
+
+    response.on("finish", () => {
+      logEvent({
+        requestId,
+        event: "request",
+        status: response.statusCode >= 400 ? "fail" : "success",
+        details: {
+          method: request.method,
+          path: request.path,
+          statusCode: response.statusCode,
+          durationMs: Date.now() - startedAt
+        }
+      });
+    });
+
+    next();
+  });
+
+  app.get("/health", (request, response) => {
+    logStep(request.requestId, "health", "success");
     response.json({
       ok: true,
       service: "pookie-node-orchestrator"
@@ -129,9 +223,20 @@ export function createApp() {
   });
 
   app.post("/mcp/execute", async (request, response) => {
+    const requestId = request.requestId;
     const { url, task, x402_sig } = request.body ?? {};
 
+    logStep(requestId, "parse-request", "start", {
+      hasUrl: typeof url === "string",
+      hasTask: typeof task === "string",
+      hasX402Sig: typeof x402_sig === "string",
+      taskLength: typeof task === "string" ? task.length : 0
+    });
+
     if (typeof url !== "string" || typeof task !== "string") {
+      logStep(requestId, "parse-request", "fail", {
+        reason: "invalid-body"
+      });
       response.status(400).json({
         ok: false,
         error: "Expected JSON body with string fields: url, task, x402_sig"
@@ -139,8 +244,19 @@ export function createApp() {
       return;
     }
 
+    logStep(requestId, "parse-request", "success", {
+      url,
+      taskLength: task.length
+    });
+
+    logStep(requestId, "x402-verify", "start", {
+      mode: "keeperhub-stub"
+    });
     const payment = verifyX402PaymentStub({ url, task, x402_sig });
     if (!payment.ok) {
+      logStep(requestId, "x402-verify", "fail", {
+        reason: payment.reason
+      });
       response.status(402).json({
         ok: false,
         error: payment.reason
@@ -148,10 +264,19 @@ export function createApp() {
       return;
     }
 
-    try {
-      const { proofPath } = await runPythonAgent({ url, task });
-      const proofHash = await uploadToZeroGStorageStub({ proofPath });
+    logStep(requestId, "x402-verify", "success", {
+      mode: payment.mode,
+      recoveredAddress: payment.recoveredAddress
+    });
 
+    try {
+      const { proofPath } = await runPythonAgent({ url, task, requestId });
+      const proofHash = await uploadToZeroGStorageStub({ proofPath, requestId });
+
+      logStep(requestId, "response", "success", {
+        proofHash,
+        proofPath
+      });
       response.json({
         ok: true,
         proofHash,
@@ -159,6 +284,9 @@ export function createApp() {
         payment
       });
     } catch (error) {
+      logStep(requestId, "response", "fail", {
+        error: truncate(error instanceof Error ? error.message : String(error))
+      });
       response.status(500).json({
         ok: false,
         error: error instanceof Error ? error.message : String(error)
