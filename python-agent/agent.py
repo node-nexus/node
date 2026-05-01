@@ -4,9 +4,8 @@ import os
 import sys
 from pathlib import Path
 
-from browser_use import Agent
+from browser_use import Agent, ChatOpenAI
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
