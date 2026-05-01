@@ -10,6 +10,7 @@ Pookie lets a laptop join a WebOps task mesh, receive MCP-style execution reques
 npm install
 npm run setup
 cp .env.example .env
+npm run check:0g
 npm start
 ```
 
@@ -30,6 +31,7 @@ PAYOUT_ADDRESS=0x0000000000000000000000000000000000000000
 
 - `npm run setup` tries to download the Gensyn AXL binary into `bin/axl-core/axl-client`. Because the public AXL repo currently has no release binaries, setup falls back to a local hackathon shim unless `REQUIRE_REAL_AXL=true` is set.
 - `npm run setup` also creates `python-agent/venv`, installs `browser-use`, `langchain-openai`, `python-dotenv`, and installs Playwright Chromium.
+- `npm run check:0g` verifies your 0G testnet router API key against `https://router-api-testnet.integratenetwork.work/v1/chat/completions` before you spend time on a browser run.
 - `npm start` launches the local Express orchestrator on `http://localhost:8080` and starts AXL with the hackathon flags:
 
 ```bash
