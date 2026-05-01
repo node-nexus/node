@@ -1,0 +1,27 @@
+{
+  "name": "pookie-node-network",
+  "version": "0.1.0",
+  "description": "CLI edge client for the Pookie Node Network ETHGlobal hackathon MVP.",
+  "type": "module",
+  "bin": {
+    "pookie-node": "./bin/pookie.js"
+  },
+  "scripts": {
+    "setup": "node scripts/setup.js",
+    "start": "pookie-node"
+  },
+  "keywords": [
+    "web3",
+    "depin",
+    "p2p",
+    "mcp",
+    "browser-use"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "ethers": "^6.13.5",
+    "express": "^4.21.2"
+  }
+}

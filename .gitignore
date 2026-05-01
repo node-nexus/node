@@ -1,0 +1,19 @@
+node_modules/
+.env
+
+# Python sidecar artifacts
+python-agent/venv/
+__pycache__/
+*.py[cod]
+
+# Runtime outputs
+final_proof.png
+*.log
+
+# Downloaded AXL binary
+bin/axl-core/axl-client
+
+# OS/editor noise
+.DS_Store
+.vscode/
+.idea/
