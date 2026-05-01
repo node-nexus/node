@@ -20,7 +20,8 @@ NODE_NAME=pookie-laptop-node
 ENS_IDENTITY=your-node.eth
 ZEROG_API_KEY=your_0g_router_api_key
 ZEROG_PRIVATE_KEY=your_0g_storage_private_key
-ZEROG_MODEL=your_0g_model_name
+ZEROG_BASE_URL=https://router-api-testnet.integratenetwork.work/v1
+ZEROG_MODEL=qwen/qwen-2.5-7b-instruct
 BROWSER_HEADLESS=false
 PAYOUT_ADDRESS=0x0000000000000000000000000000000000000000
 ```
@@ -74,7 +75,7 @@ Successful responses look like:
 
 - **Networking:** Gensyn AXL binary handles mesh routing and forwards MCP payloads to the local orchestrator.
 - **Orchestrator:** Node.js Express server validates the request shape, stubs x402 verification with `ethers`, runs the Python sidecar, and stubs a 0G proof upload.
-- **Execution:** `python-agent/agent.py` uses `browser-use` with `langchain-openai` against the 0G OpenAI-compatible router at `https://router-api.0g.ai/v1`.
+- **Execution:** `python-agent/agent.py` uses `browser-use` against the 0G testnet OpenAI-compatible router at `https://router-api-testnet.integratenetwork.work/v1`.
 - **Proof:** The Python sidecar saves `final_proof.png`; Node returns a mock `0g://` hash.
 
 ## Current Hackathon Stubs
@@ -88,7 +89,7 @@ Successful responses look like:
 - **`npm run setup` cannot download AXL:** The default URL is a placeholder release path: `https://github.com/gensyn-ai/axl/releases/latest/download/axl-client-{platform}-{arch}`. Since the public AXL repo currently has no release binaries, setup creates a local shim so the demo can still boot. To require a real binary, run `REQUIRE_REAL_AXL=true npm run setup`.
 - **Using a real AXL binary:** Build/download AXL manually and place it at `bin/axl-core/axl-client`, or rerun with `AXL_RELEASE_BASE_URL` pointing to a compatible release.
 - **`npm start` says Python venv is missing:** Run `npm run setup`. If AXL download failed first, create the venv manually with `python3 -m venv python-agent/venv`, install `python-agent/requirements.txt`, and run `python-agent/venv/bin/python3 -m playwright install chromium`.
-- **Browser task fails immediately:** Confirm `.env` contains `ZEROG_API_KEY` and `ZEROG_MODEL`.
+- **Browser task fails immediately:** Confirm `.env` contains a funded 0G testnet `ZEROG_API_KEY`, `ZEROG_BASE_URL=https://router-api-testnet.integratenetwork.work/v1`, and `ZEROG_MODEL=qwen/qwen-2.5-7b-instruct`.
 - **Browser window does not appear:** By default the Python agent runs with a visible Chromium window. Set `BROWSER_HEADLESS=false` in `.env` for demos, or `BROWSER_HEADLESS=true` for background/headless runs.
 - **Playwright complains Chromium is missing:** Run `python-agent/venv/bin/python3 -m playwright install chromium`.
 - **AXL rejects CLI flags:** Replace the hackathon flag spawn in `bin/pookie.js` with the config/router mode described in the Gensyn AXL docs once the exact binary release shape is finalized.

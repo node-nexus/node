@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PROOF_PATH = PROJECT_ROOT / "final_proof.png"
-ZEROG_BASE_URL = "https://router-api.0g.ai/v1"
+DEFAULT_ZEROG_BASE_URL = "https://router-api-testnet.integratenetwork.work/v1"
 
 
 def fail(message: str, exit_code: int = 1) -> None:
@@ -73,6 +73,7 @@ async def main() -> None:
 
     api_key = os.getenv("ZEROG_API_KEY")
     model = os.getenv("ZEROG_MODEL")
+    base_url = os.getenv("ZEROG_BASE_URL", DEFAULT_ZEROG_BASE_URL)
 
     if not api_key:
         fail("Missing ZEROG_API_KEY in environment or .env")
@@ -82,7 +83,7 @@ async def main() -> None:
 
     llm = ChatOpenAI(
         api_key=api_key,
-        base_url=ZEROG_BASE_URL,
+        base_url=base_url,
         model=model,
         temperature=0,
     )
