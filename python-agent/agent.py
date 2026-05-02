@@ -1,10 +1,10 @@
+import argparse
 import asyncio
 import ast
 import inspect
 import json
 import os
 import re
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -20,13 +20,18 @@ from browser_use.llm.openai.serializer import OpenAIMessageSerializer
 from browser_use.llm.views import ChatInvokeCompletion
 from dotenv import load_dotenv
 
+from reporting import (
+    analyze_task_report,
+    render_pdf_report,
+    summarize_history,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PROOF_PATH = PROJECT_ROOT / "final_proof.png"
+ARTIFACTS_ROOT = PROJECT_ROOT / "artifacts"
 DEFAULT_ZEROG_BASE_URL = "https://router-api-testnet.integratenetwork.work/v1"
 BROWSER_USE_ACTION_SCHEMA_HINT = (
     "Use one concise browser action at a time. Do not use screenshot or PDF tools; call done when the "
-    "page is positioned for final_proof.png."
+    "page is positioned for final evidence capture."
 )
 ACTIVE_USER_TASK = ""
 ACTIVE_INITIAL_URL = ""
@@ -44,7 +49,7 @@ QWEN_ACTION_PROMPT = (
     "search. For site search, type into that site's visible search field and include send_keys Enter in the "
     "same step to submit. Do not leave the starting website unless the "
     "user explicitly asks to. If the requested evidence is visible, use done. For screenshot tasks, position "
-    "the page then use done; another process captures final_proof.png. On a search results page, use done "
+    "the page then use done; another process captures final evidence screenshots. On a search results page, use done "
     "for screenshot tasks. Do not send Enter unless you just typed into an input in the same step. Do not wait "
     "unless the page has no usable content."
 )
@@ -320,6 +325,18 @@ def browser_use_actions_from_simple(action: Any) -> list[dict[str, Any]]:
             "text": params[1],
             "clear": bool(params[2]) if len(params) >= 3 else True,
         }
+    elif isinstance(params, list):
+        first_param = params[0] if params else ""
+        list_param_fields = {
+            "find_text": "text",
+            "send_keys": "keys",
+            "navigate": "url",
+            "extract": "query",
+        }
+        if name in list_param_fields:
+            params = {list_param_fields[name]: first_param}
+        else:
+            params = {}
     elif not isinstance(params, dict):
         params = coerce_object_value(params)
 
@@ -482,7 +499,7 @@ def agent_output_from_simple_qwen(parsed: dict[str, Any], context: str = "") -> 
         action = {
             "name": "done",
             "params": {
-                "text": "The requested search results are visible for the proof screenshot.",
+                "text": "The requested search results are visible for the evidence screenshot.",
                 "success": True,
             },
         }
@@ -517,7 +534,7 @@ def normalize_agent_output_json(text: str, context: str = "") -> dict[str, Any] 
             parsed["action"] = [
                 {
                     "done": {
-                        "text": "Task completed; final_proof.png will capture the visible evidence page.",
+                        "text": "Task completed; final evidence screenshots will capture the visible evidence page.",
                         "success": True,
                     }
                 }
@@ -539,7 +556,7 @@ def normalize_agent_output_json(text: str, context: str = "") -> dict[str, Any] 
             parsed["action"] = [
                 {
                     "done": {
-                        "text": "Task completed; the browser is positioned on the evidence page for final_proof.png.",
+                        "text": "Task completed; the browser is positioned on the evidence page for final capture.",
                         "success": True,
                     }
                 }
@@ -712,17 +729,51 @@ async def maybe_await(value):
     return value
 
 
-async def capture_final_screenshot(browser_session: BrowserSession, proof_path: Path) -> str:
-    """Capture the final page controlled by browser-use, not a freshly opened URL."""
-    await maybe_await(browser_session.take_screenshot(path=str(proof_path), full_page=False))
+def info(key: str, value: Any) -> None:
+    if isinstance(value, (dict, list)):
+        rendered = json.dumps(value, ensure_ascii=True)
+    else:
+        rendered = str(value)
 
-    if not proof_path.exists():
-        fail("Browser task completed, but final screenshot was not written")
+    print(f"INFO|{key}={rendered}", flush=True)
+
+
+def project_relative(path: Path) -> str:
+    return path.resolve().relative_to(PROJECT_ROOT).as_posix()
+
+
+def sanitize_request_id(value: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip())
+    return sanitized[:120] or "manual"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run a browser-use task and generate a tester PDF report.")
+    parser.add_argument("url")
+    parser.add_argument("task")
+    parser.add_argument("--request-id", default=os.getenv("REQUEST_ID", "manual"))
+    return parser.parse_args()
+
+
+async def capture_screenshot(browser_session: BrowserSession, screenshot_path: Path) -> str:
+    await maybe_await(browser_session.take_screenshot(path=str(screenshot_path), full_page=False))
+
+    if not screenshot_path.exists():
+        fail(f"Screenshot was not written: {screenshot_path}")
+
+    return project_relative(screenshot_path)
+
+
+async def capture_final_screenshot(browser_session: BrowserSession, screenshot_path: Path) -> tuple[str, str]:
+    """Capture the final page controlled by browser-use, not a freshly opened URL."""
+    screenshot = await capture_screenshot(browser_session, screenshot_path)
 
     try:
-        return await maybe_await(browser_session.get_current_page_url())
+        final_url = await maybe_await(browser_session.get_current_page_url())
     except Exception:
-        return "unknown"
+        final_url = "unknown"
+
+    return final_url, screenshot
 
 
 def summarize_agent_failure(history) -> str:
@@ -749,19 +800,22 @@ def env_bool(name: str, default: bool) -> bool:
 
 
 async def main() -> None:
-    if len(sys.argv) < 3:
-        fail("Usage: python-agent/agent.py <url> <task>")
-
-    url = sys.argv[1]
-    task = sys.argv[2]
+    args = parse_args()
+    url = args.url
+    task = args.task
     initial_url = url
+    request_id = sanitize_request_id(args.request_id)
+    artifact_dir = ARTIFACTS_ROOT / request_id
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    screenshots: list[str] = []
+
     global ACTIVE_USER_TASK, ACTIVE_INITIAL_URL, RESULT_PAGE_NAVIGATION_SEEN
     ACTIVE_USER_TASK = task
     ACTIVE_INITIAL_URL = initial_url
     RESULT_PAGE_NAVIGATION_SEEN = False
-    PROOF_PATH.unlink(missing_ok=True)
 
     load_dotenv(PROJECT_ROOT / ".env")
+    info("artifactDir", project_relative(artifact_dir))
 
     api_key = os.getenv("ZEROG_API_KEY")
     model = os.getenv("ZEROG_MODEL")
@@ -791,8 +845,8 @@ async def main() -> None:
         f"Complete this WebOps task: {task}\n"
         "Stay on the submitted website unless the user explicitly asks you to leave it.\n"
         "For search tasks on a site, interact with that site's visible search UI like a user would.\n"
-        "When finished, leave the browser visually positioned on the best evidence page for the proof screenshot.\n"
-        "Do not use save_as_pdf or screenshot tools; the orchestrator captures final_proof.png automatically after done."
+        "When finished, leave the browser visually positioned on the best evidence page for screenshots.\n"
+        "Do not use save_as_pdf or screenshot tools; the orchestrator captures evidence screenshots automatically after done."
     )
 
     browser_profile = BrowserProfile(
@@ -817,20 +871,58 @@ async def main() -> None:
     )
 
     try:
-        history = await agent.run(max_steps=20)
+        step_counter = 0
+
+        async def capture_step(_agent: Agent) -> None:
+            nonlocal step_counter
+            step_counter += 1
+            screenshot_path = artifact_dir / f"step-{step_counter:02d}.png"
+            try:
+                screenshots.append(await capture_screenshot(browser_session, screenshot_path))
+            except Exception as error:
+                info("screenshotWarning", f"{screenshot_path.name}: {error}")
+
+        history = await agent.run(max_steps=20, on_step_end=capture_step)
         is_successful = history.is_successful()
 
         if history.is_done() is not True or is_successful is False:
             fail(summarize_agent_failure(history))
 
-        final_url = await capture_final_screenshot(browser_session, PROOF_PATH)
-        print(f"INFO|final_url={final_url}", flush=True)
+        final_url, final_screenshot = await capture_final_screenshot(browser_session, artifact_dir / "01-final.png")
+        if final_screenshot in screenshots:
+            screenshots.remove(final_screenshot)
+        screenshots.append(final_screenshot)
+
+        history_summary = summarize_history(history)
+        report = await analyze_task_report(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            original_url=initial_url,
+            task=task,
+            final_url=final_url,
+            history_summary=history_summary,
+            screenshots=screenshots,
+        )
+        report_path = render_pdf_report(
+            report_path=artifact_dir / "report.pdf",
+            artifact_dir=artifact_dir,
+            original_url=initial_url,
+            task=task,
+            final_url=final_url,
+            report=report,
+            screenshots=screenshots,
+            request_id=request_id,
+        )
+        info("finalUrl", final_url)
+        info("screenshots", screenshots)
+        info("reportPath", project_relative(report_path))
     except Exception as error:
         fail(str(error))
     finally:
         await maybe_await(browser_session.stop())
 
-    print("SUCCESS|./final_proof.png", flush=True)
+    print(f"SUCCESS|{project_relative(artifact_dir / 'report.pdf')}", flush=True)
 
 
 if __name__ == "__main__":

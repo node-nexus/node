@@ -121,7 +121,7 @@ function installPythonAgent() {
 
   writeFileSync(
     requirementsPath,
-    ["browser-use", "langchain-openai", "python-dotenv", "playwright", ""].join("\n")
+    ["browser-use", "langchain-openai", "python-dotenv", "playwright", "reportlab", ""].join("\n")
   );
 
   const venvPython =

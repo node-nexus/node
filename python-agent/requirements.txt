@@ -2,3 +2,4 @@ browser-use
 langchain-openai
 python-dotenv
 playwright
+reportlab

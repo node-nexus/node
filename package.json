@@ -21,8 +21,9 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@0gfoundation/0g-storage-ts-sdk": "1.2.8",
     "dotenv": "^16.4.7",
-    "ethers": "^6.13.5",
+    "ethers": "6.13.1",
     "express": "^4.21.2"
   }
 }

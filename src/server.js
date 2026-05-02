@@ -1,6 +1,4 @@
-import { exec } from "node:child_process";
 import crypto from "node:crypto";
-import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,73 +6,17 @@ import dotenv from "dotenv";
 import express from "express";
 import { verifyMessage } from "ethers";
 
+import { applyArtifactRetention } from "./artifacts.js";
+import { logEvent, logStep, truncate } from "./logging.js";
+import { runPythonAgent } from "./pythonAgent.js";
+import {
+  uploadReportToZeroGStorage,
+  validateZeroGStorageConfig
+} from "./zeroGStorage.js";
+
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const projectRoot = path.resolve(__dirname, "..");
-const agentPath = path.join(projectRoot, "python-agent", "agent.py");
-const venvPython =
-  process.platform === "win32"
-    ? path.join(projectRoot, "python-agent", "venv", "Scripts", "python.exe")
-    : path.join(projectRoot, "python-agent", "venv", "bin", "python3");
-
-function truncate(value, maxLength = 500) {
-  const text = String(value ?? "");
-  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
-}
-
-function logEvent({ requestId, event, step, status, details = {} }) {
-  console.log(
-    JSON.stringify({
-      time: new Date().toISOString(),
-      requestId,
-      event,
-      step,
-      status,
-      ...details
-    })
-  );
-}
-
-function logStep(requestId, step, status, details = {}) {
-  logEvent({
-    requestId,
-    event: "step",
-    step,
-    status,
-    details
-  });
-}
-
-function parsePythonInfo(stdout) {
-  return Object.fromEntries(
-    stdout
-      .split(/\r?\n/)
-      .filter((line) => line.startsWith("INFO|"))
-      .map((line) => line.slice("INFO|".length))
-      .map((entry) => {
-        const separatorIndex = entry.indexOf("=");
-        if (separatorIndex === -1) {
-          return [entry, true];
-        }
-
-        return [entry.slice(0, separatorIndex), entry.slice(separatorIndex + 1)];
-      })
-  );
-}
-
-function parsePythonError(stdout) {
-  return stdout
-    .split(/\r?\n/)
-    .find((line) => line.startsWith("ERROR|"))
-    ?.slice("ERROR|".length)
-    .trim();
-}
-
-function shellQuote(value) {
-  return `'${String(value).replaceAll("'", "'\\''")}'`;
-}
 
 function verifyX402PaymentStub({ url, task, x402_sig }) {
   if (!x402_sig || typeof x402_sig !== "string") {
@@ -103,106 +45,6 @@ function verifyX402PaymentStub({ url, task, x402_sig }) {
       recoveredAddress: null
     };
   }
-}
-
-function runPythonAgent({ url, task, requestId }) {
-  return new Promise((resolve, reject) => {
-    if (!existsSync(venvPython)) {
-      logStep(requestId, "python-agent", "fail", {
-        reason: "missing-venv",
-        venvPython
-      });
-      reject(
-        new Error(
-          `Python virtual environment not found at ${venvPython}. Run npm run setup first.`
-        )
-      );
-      return;
-    }
-
-    const command = [
-      shellQuote(venvPython),
-      shellQuote(agentPath),
-      shellQuote(url),
-      shellQuote(task)
-    ].join(" ");
-
-    logStep(requestId, "python-agent", "start", {
-      agentPath,
-      timeoutMs: 10 * 60 * 1000
-    });
-
-    exec(
-      command,
-      {
-        cwd: projectRoot,
-        env: process.env,
-        timeout: 10 * 60 * 1000,
-        maxBuffer: 1024 * 1024 * 10
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          const pythonError = parsePythonError(stdout);
-          const details = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
-          logStep(requestId, "python-agent", "fail", {
-            error: truncate(pythonError || details || error.message),
-            exitCode: error.code ?? null,
-            signal: error.signal ?? null
-          });
-          reject(new Error(pythonError || details || error.message));
-          return;
-        }
-
-        const successLine = stdout
-          .split(/\r?\n/)
-          .find((line) => line.startsWith("SUCCESS|"));
-
-        if (!successLine) {
-          logStep(requestId, "python-agent", "fail", {
-            reason: "missing-success-marker",
-            stdout: truncate(stdout)
-          });
-          reject(new Error(`Python agent did not return SUCCESS marker. stdout: ${stdout}`));
-          return;
-        }
-
-        const proofPath = successLine.slice("SUCCESS|".length).trim();
-        const info = parsePythonInfo(stdout);
-        logStep(requestId, "python-agent", "success", {
-          proofPath,
-          ...info,
-          stderr: stderr.trim() ? truncate(stderr.trim()) : undefined
-        });
-        resolve({
-          proofPath,
-          info,
-          stdout,
-          stderr
-        });
-      }
-    );
-  });
-}
-
-async function uploadToZeroGStorageStub({ proofPath, requestId }) {
-  logStep(requestId, "0g-upload", "start", {
-    proofPath
-  });
-
-  // TODO: Replace with the real 0G Storage client upload. The timestamp keeps
-  // each proof unique while still looking like a content-addressed artifact.
-  const digest = crypto
-    .createHash("sha256")
-    .update(`${proofPath}:${Date.now()}:${process.env.ZEROG_PRIVATE_KEY ?? ""}`)
-    .digest("hex");
-
-  const proofHash = `0g://${digest}`;
-
-  logStep(requestId, "0g-upload", "success", {
-    proofHash
-  });
-
-  return proofHash;
 }
 
 export function createApp() {
@@ -298,18 +140,52 @@ export function createApp() {
       recoveredAddress: payment.recoveredAddress
     });
 
+    const storageValidation = validateZeroGStorageConfig();
+    if (!storageValidation.ok) {
+      logStep(requestId, "0g-storage-config", "fail", {
+        missing: storageValidation.missing
+      });
+      response.status(500).json({
+        ok: false,
+        error: `Missing 0G Storage configuration: ${storageValidation.missing.join(", ")}`
+      });
+      return;
+    }
+
+    logStep(requestId, "0g-storage-config", "success", {
+      storageRpcUrl: storageValidation.config.storageRpcUrl,
+      storageIndexerRpc: storageValidation.config.storageIndexerRpc
+    });
+
     try {
-      const { proofPath } = await runPythonAgent({ url, task, requestId });
-      const proofHash = await uploadToZeroGStorageStub({ proofPath, requestId });
+      const agentResult = await runPythonAgent({ url, task, requestId });
+
+      logStep(requestId, "0g-upload", "start", {
+        reportPath: agentResult.reportPath
+      });
+      const upload = await uploadReportToZeroGStorage(agentResult.reportPath);
+      logStep(requestId, "0g-upload", "success", {
+        reportHash: upload.reportHash,
+        reportUri: upload.reportUri,
+        txHash: upload.txHash
+      });
+      applyArtifactRetention({
+        screenshots: agentResult.screenshots
+      });
 
       logStep(requestId, "response", "success", {
-        proofHash,
-        proofPath
+        reportHash: upload.reportHash,
+        reportUri: upload.reportUri,
+        reportPath: agentResult.reportPath
       });
       response.json({
         ok: true,
-        proofHash,
-        proofPath,
+        reportHash: upload.reportHash,
+        reportUri: upload.reportUri,
+        txHash: upload.txHash,
+        reportPath: agentResult.reportPath,
+        artifactDir: agentResult.artifactDir,
+        screenshots: agentResult.screenshots,
         payment
       });
     } catch (error) {
