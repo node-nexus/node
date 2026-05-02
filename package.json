@@ -1,9 +1,10 @@
 {
-  "name": "pookie-node-network",
+  "name": "node-nexus-network",
   "version": "0.1.0",
-  "description": "CLI edge client for the Pookie Node Network ETHGlobal hackathon MVP.",
+  "description": "Decentralized local WebOps reporting node for the Node Nexus network.",
   "type": "module",
   "bin": {
+    "node-nexus": "./bin/pookie.js",
     "pookie-node": "./bin/pookie.js"
   },
   "scripts": {

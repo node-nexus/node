@@ -12,6 +12,10 @@ artifacts/
 
 # Downloaded AXL binary
 bin/axl-core/axl-client
+bin/axl-core/node
+bin/axl-core/private.pem
+bin/axl-core/node-config.json
+vendor/axl/
 
 # OS/editor noise
 .DS_Store

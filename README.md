@@ -1,103 +1,190 @@
-# Pookie Node Network
+# Node Nexus
 
-CLI edge client for the Pookie Node Network ETHGlobal hackathon MVP.
+Node Nexus: decentralized local WebOps reports from real user-run nodes.
 
-Pookie lets a laptop join a WebOps task mesh, receive MCP-style execution requests, run an AI browser worker, and return a 0G-hosted tester report. This repo is intentionally hackathon-shaped: the P2P, payment, browser, and storage seams are all visible so judges can understand the full DePIN flow quickly.
+Each operator runs a node from their real location. A requester can dispatch a browser task to one or more geographically distributed nodes over Gensyn AXL. Each node executes the task locally with browser-use and Qwen through the 0G router, generates a human-style PDF report with screenshots and local UX observations, uploads report artifacts to 0G Storage when enabled, and returns report details over the mesh.
 
-## Quickstart for Judges
+## Architecture
+
+```text
+Requester
+  -> local Node Nexus API
+  -> Gensyn AXL mesh
+  -> remote Node Nexus operators
+  -> /mcp/execute on each local node
+  -> browser-use + Qwen
+  -> PDF report + screenshots
+  -> 0G Storage
+  -> report URI + summary over AXL
+```
+
+## Why It Exists
+
+Global web behavior is local. Consent banners, language, search results, CDN routing, blocked content, pricing, currency, redirects, and login walls can all differ by operator location. Node Nexus turns real user-run nodes into a decentralized local WebOps testing network.
+
+## How It Works
+
+- **AXL mesh:** real inter-node communication uses Gensyn AXL. Node Nexus does not replace it with centralized discovery.
+- **Local execution:** each node runs browser-use with Qwen via the 0G OpenAI-compatible router.
+- **Reports:** the Python agent captures evidence screenshots and renders `report.pdf`.
+- **0G Storage:** real mode uploads PDF and metadata to 0G Storage; disabled mode keeps local artifacts only.
+
+## Modes
+
+- `AXL_MODE=disabled`: local HTTP API only.
+- `AXL_MODE=mock`: starts the local setup shim and labels all mesh behavior as mock.
+- `AXL_MODE=real`: starts a real AXL binary and fails clearly if missing.
+- `ZERO_G_UPLOAD_MODE=disabled`: returns local report paths, no fake hash.
+- `ZERO_G_UPLOAD_MODE=real`: uploads report and metadata using 0G Storage credentials.
+
+## Setup
 
 ```bash
 npm install
-npm run setup
 cp .env.example .env
+cp config/node-profile.example.json config/node-profile.json
+npm run setup
+```
+
+Edit `config/node-profile.json` with the real operator location. Do not hardcode fake country/city for production demos.
+
+`npm run setup` does the full local dependency setup:
+
+- Detects an existing real AXL binary at `AXL_BINARY_PATH` or `bin/axl-core/node`.
+- If missing, clones `https://github.com/gensyn-ai/axl` into ignored `vendor/axl/` and builds the official Go node with the upstream-pinned `GOTOOLCHAIN=go1.25.5`.
+- Generates `bin/axl-core/private.pem` and `bin/axl-core/node-config.json`.
+- Falls back to the mock shim only if the build fails and `REQUIRE_REAL_AXL=true` is not set.
+- Creates/reuses `python-agent/venv`, installs browser-use/Qwen/report dependencies, and installs Playwright Chromium.
+
+If you change `AXL_MCP_FORWARD_URL`, `AXL_PEERS`, or `AXL_LISTEN`, rerun `npm run setup` so `bin/axl-core/node-config.json` matches the node you intend to start.
+
+Check 0G inference credentials:
+
+```bash
 npm run check:0g
+```
+
+## Running
+
+Local node with no mesh and no storage upload:
+
+```bash
+AXL_MODE=disabled ZERO_G_UPLOAD_MODE=disabled npm start
+```
+
+Mock AXL:
+
+```bash
+AXL_MODE=mock ZERO_G_UPLOAD_MODE=disabled npm start
+```
+
+Real AXL:
+
+```bash
+AXL_MODE=real \
+AXL_BINARY_PATH=bin/axl-core/node \
+AXL_CONFIG_PATH=bin/axl-core/node-config.json \
+AXL_NETWORK=testnet \
+AXL_IDENTITY=node-identity \
+AXL_MCP_FORWARD_URL=http://localhost:8080/mcp/execute \
 npm start
 ```
 
-Then edit `.env` before starting for real:
+Real 0G upload:
 
 ```bash
-NODE_NAME=pookie-laptop-node
-ENS_IDENTITY=your-node.eth
-ZEROG_API_KEY=your_0g_router_api_key
-ZEROG_PRIVATE_KEY=your_0g_storage_private_key
-ZEROG_BASE_URL=https://router-api-testnet.integratenetwork.work/v1
-ZEROG_MODEL=qwen/qwen-2.5-7b-instruct
-ZEROG_STORAGE_RPC_URL=https://evmrpc-testnet.0g.ai
-ZEROG_STORAGE_INDEXER_RPC=https://indexer-storage-testnet-turbo.0g.ai
-BROWSER_HEADLESS=false
-ARTIFACT_RETENTION=keep
-PAYOUT_ADDRESS=0x0000000000000000000000000000000000000000
+ZERO_G_UPLOAD_MODE=real \
+ZERO_G_STORAGE_RPC_URL=https://evmrpc-testnet.0g.ai \
+ZERO_G_STORAGE_INDEXER_URL=https://indexer-storage-testnet-turbo.0g.ai \
+ZERO_G_PRIVATE_KEY=... \
+npm start
 ```
 
-## What Runs
+## API Examples
 
-- `npm run setup` tries to download the Gensyn AXL binary into `bin/axl-core/axl-client`. Because the public AXL repo currently has no release binaries, setup falls back to a local hackathon shim unless `REQUIRE_REAL_AXL=true` is set.
-- `npm run setup` also creates `python-agent/venv`, installs `browser-use`, `langchain-openai`, `python-dotenv`, `reportlab`, and installs Playwright Chromium.
-- `npm run check:0g` verifies your 0G testnet router API key against `https://router-api-testnet.integratenetwork.work/v1/chat/completions` before you spend time on a browser run.
-- `npm start` launches the local Express orchestrator on `http://localhost:8080` and starts AXL with the hackathon flags:
-
-```bash
-bin/axl-core/axl-client \
-  --network testnet \
-  --identity "$ENS_IDENTITY" \
-  --mcp-forward http://localhost:8080/mcp/execute
-```
-
-The package also exposes a CLI bin named `pookie-node`.
-
-## Local API
-
-Health check:
+Health:
 
 ```bash
 curl http://localhost:8080/health
 ```
 
-Submit a WebOps task directly to the orchestrator:
+Node profile:
+
+```bash
+curl http://localhost:8080/node/profile
+```
+
+AXL status:
+
+```bash
+curl http://localhost:8080/axl/status
+```
+
+Run a local WebOps task:
 
 ```bash
 curl -X POST http://localhost:8080/mcp/execute \
   -H "Content-Type: application/json" \
   -d '{
+    "taskId": "demo-001",
     "url": "https://example.com",
-    "task": "Find the page title and leave the browser on the evidence page.",
-    "x402_sig": "demo-signature"
+    "task": "Open the site, observe the page from this local node, and capture evidence.",
+    "reportType": "webops-local-ux"
   }'
 ```
 
-Successful responses look like:
+Dispatch skeleton:
 
-```json
-{
-  "ok": true,
-  "reportHash": "0x...",
-  "reportUri": "0g://0x...",
-  "reportPath": "artifacts/<requestId>/report.pdf",
-  "artifactDir": "artifacts/<requestId>",
-  "screenshots": ["artifacts/<requestId>/01-final.png"]
-}
+```bash
+curl -X POST http://localhost:8080/axl/dispatch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com",
+    "task": "Check local UX and capture a report.",
+    "targetNodes": ["peer-id-1", "peer-id-2"],
+    "targetLocations": ["IN", "US"],
+    "reportType": "webops-local-ux"
+  }'
 ```
 
-## Architecture
+In real AXL mode, dispatch requires a configured real AXL local API. Node Nexus does not fake remote delivery.
 
-- **Networking:** Gensyn AXL binary handles mesh routing and forwards MCP payloads to the local orchestrator.
-- **Orchestrator:** Node.js Express server validates the request shape, stubs x402 verification with `ethers`, runs the Python sidecar, and uploads the generated PDF report to 0G Storage.
-- **Execution:** `python-agent/agent.py` uses `browser-use` against the 0G testnet OpenAI-compatible router at `https://router-api-testnet.integratenetwork.work/v1`.
-- **Report:** The Python sidecar writes screenshots and `report.pdf` under `artifacts/<requestId>/`; Node returns the 0G Storage root hash and URI for the PDF.
+## Artifact Layout
 
-## Current Hackathon Stubs
+```text
+artifacts/
+  <taskId>/
+    metadata.json
+    screenshots/
+      01-final.png
+      step-001.png
+    report.pdf
+  node-metadata.json
+```
 
-- KeeperHub x402 verification is a clearly marked stub in `src/server.js`.
-- The AXL runtime uses the requested hackathon flags. Current public AXL docs also describe a config/router mode, so the CLI includes a note where that swap would happen.
+`ARTIFACT_RETENTION=keep` is the default. `ARTIFACT_RETENTION=delete_screenshots_after_upload` deletes screenshots after the upload phase.
 
-## Troubleshooting
+## Sponsor Alignment
 
-- **`npm run setup` cannot download AXL:** The default URL is a placeholder release path: `https://github.com/gensyn-ai/axl/releases/latest/download/axl-client-{platform}-{arch}`. Since the public AXL repo currently has no release binaries, setup creates a local shim so the demo can still boot. To require a real binary, run `REQUIRE_REAL_AXL=true npm run setup`.
-- **Using a real AXL binary:** Build/download AXL manually and place it at `bin/axl-core/axl-client`, or rerun with `AXL_RELEASE_BASE_URL` pointing to a compatible release.
-- **`npm start` says Python venv is missing:** Run `npm run setup`. If AXL download failed first, create the venv manually with `python3 -m venv python-agent/venv`, install `python-agent/requirements.txt`, and run `python-agent/venv/bin/python3 -m playwright install chromium`.
-- **0G Storage upload fails before browser execution:** Confirm `.env` contains `ZEROG_PRIVATE_KEY`. Optional storage endpoint overrides are `ZEROG_STORAGE_RPC_URL` and `ZEROG_STORAGE_INDEXER_RPC`.
-- **Browser task fails immediately:** Confirm `.env` contains a funded 0G testnet `ZEROG_API_KEY`, `ZEROG_BASE_URL=https://router-api-testnet.integratenetwork.work/v1`, and `ZEROG_MODEL=qwen/qwen-2.5-7b-instruct`.
-- **Browser window does not appear:** By default the Python agent runs with a visible Chromium window. Set `BROWSER_HEADLESS=false` in `.env` for demos, or `BROWSER_HEADLESS=true` for background/headless runs.
-- **Playwright complains Chromium is missing:** Run `python-agent/venv/bin/python3 -m playwright install chromium`.
-- **AXL rejects CLI flags:** Replace the hackathon flag spawn in `bin/pookie.js` with the config/router mode described in the Gensyn AXL docs once the exact binary release shape is finalized.
+- **Gensyn AXL:** inter-node mesh communication is the required real-mode path.
+- **0G:** PDF reports and metadata are uploaded to 0G Storage in real upload mode.
+
+## Known Limitations
+
+- Qwen JSON can be unstable; the agent normalizes browser-use actions and falls back to a deterministic report summary if report analysis fails.
+- YouTube and complex SPAs can be slow.
+- Real mesh mode requires a real AXL binary and compatible local API for remote dispatch.
+- Real 0G upload requires funded 0G credentials.
+
+## Demo Script
+
+1. Start Node A:
+   `AXL_MODE=mock ZERO_G_UPLOAD_MODE=disabled PORT=8080 npm start`
+2. Start Node B from another checkout or terminal with a different port/profile.
+3. Submit `/mcp/execute` locally or call `/axl/dispatch` in mock mode.
+4. Inspect `artifacts/<taskId>/report.pdf` and `metadata.json`.
+5. Enable `ZERO_G_UPLOAD_MODE=real` with credentials to collect real `0g://...` report URIs.
+
+## Compatibility Notes
+
+The CLI file remains `bin/pookie.js` and the `pookie-node` binary alias remains available to avoid breaking existing scripts. User-facing product text and runtime service names use Node Nexus.

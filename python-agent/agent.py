@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 
 from reporting import (
     analyze_task_report,
+    deterministic_report,
     render_pdf_report,
     summarize_history,
 )
@@ -752,6 +753,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("url")
     parser.add_argument("task")
     parser.add_argument("--request-id", default=os.getenv("REQUEST_ID", "manual"))
+    parser.add_argument("--task-id", default=os.getenv("TASK_ID", ""))
+    parser.add_argument("--node-profile-json", default=os.getenv("NODE_PROFILE_JSON", "{}"))
+    parser.add_argument("--report-type", default=os.getenv("REPORT_TYPE", "webops-local-ux"))
+    parser.add_argument("--requested-by", default=os.getenv("REQUESTED_BY", ""))
+    parser.add_argument("--target-location", default=os.getenv("TARGET_LOCATION", ""))
     return parser.parse_args()
 
 
@@ -805,9 +811,20 @@ async def main() -> None:
     task = args.task
     initial_url = url
     request_id = sanitize_request_id(args.request_id)
-    artifact_dir = ARTIFACTS_ROOT / request_id
+    task_id = sanitize_request_id(args.task_id or request_id)
+    try:
+        node_profile = json.loads(args.node_profile_json)
+        if not isinstance(node_profile, dict):
+            node_profile = {}
+    except json.JSONDecodeError:
+        node_profile = {}
+
+    artifact_dir = ARTIFACTS_ROOT / task_id
+    screenshots_dir = artifact_dir / "screenshots"
     artifact_dir.mkdir(parents=True, exist_ok=True)
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
     screenshots: list[str] = []
+    warnings: list[str] = []
 
     global ACTIVE_USER_TASK, ACTIVE_INITIAL_URL, RESULT_PAGE_NAVIGATION_SEEN
     ACTIVE_USER_TASK = task
@@ -815,6 +832,7 @@ async def main() -> None:
     RESULT_PAGE_NAVIGATION_SEEN = False
 
     load_dotenv(PROJECT_ROOT / ".env")
+    info("taskId", task_id)
     info("artifactDir", project_relative(artifact_dir))
 
     api_key = os.getenv("ZEROG_API_KEY")
@@ -876,11 +894,13 @@ async def main() -> None:
         async def capture_step(_agent: Agent) -> None:
             nonlocal step_counter
             step_counter += 1
-            screenshot_path = artifact_dir / f"step-{step_counter:02d}.png"
+            screenshot_path = screenshots_dir / f"step-{step_counter:03d}.png"
             try:
                 screenshots.append(await capture_screenshot(browser_session, screenshot_path))
             except Exception as error:
-                info("screenshotWarning", f"{screenshot_path.name}: {error}")
+                warning = f"{screenshot_path.name}: {error}"
+                warnings.append(warning)
+                info("screenshotWarning", warning)
 
         history = await agent.run(max_steps=20, on_step_end=capture_step)
         is_successful = history.is_successful()
@@ -888,35 +908,78 @@ async def main() -> None:
         if history.is_done() is not True or is_successful is False:
             fail(summarize_agent_failure(history))
 
-        final_url, final_screenshot = await capture_final_screenshot(browser_session, artifact_dir / "01-final.png")
+        final_url, final_screenshot = await capture_final_screenshot(browser_session, screenshots_dir / "01-final.png")
         if final_screenshot in screenshots:
             screenshots.remove(final_screenshot)
         screenshots.append(final_screenshot)
 
         history_summary = summarize_history(history)
-        report = await analyze_task_report(
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            original_url=initial_url,
-            task=task,
-            final_url=final_url,
-            history_summary=history_summary,
-            screenshots=screenshots,
-        )
+        report_analysis_status = "completed"
+        try:
+            report = await analyze_task_report(
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                original_url=initial_url,
+                task=task,
+                task_id=task_id,
+                final_url=final_url,
+                node_profile=node_profile,
+                history_summary=history_summary,
+                screenshots=screenshots,
+                notes=warnings,
+            )
+        except Exception as analysis_error:
+            report_analysis_status = "failed"
+            warnings.append(f"Report analysis failed: {analysis_error}")
+            report = deterministic_report(
+                task=task,
+                final_url=final_url,
+                history_summary=history_summary,
+                screenshots=screenshots,
+                error=str(analysis_error),
+            )
+        metadata_path = artifact_dir / "metadata.json"
+        metadata = {
+            "taskId": task_id,
+            "requestId": request_id,
+            "nodeProfile": node_profile,
+            "url": initial_url,
+            "task": task,
+            "reportType": args.report_type,
+            "requestedBy": args.requested_by or None,
+            "targetLocation": args.target_location or None,
+            "finalUrl": final_url,
+            "status": report.get("completionStatus", "completed"),
+            "screenshots": screenshots,
+            "reportPath": project_relative(artifact_dir / "report.pdf"),
+            "metadataPath": project_relative(metadata_path),
+            "reportAnalysisStatus": report_analysis_status,
+            "reportAnalysis": report,
+            "createdAt": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+            "errors": [],
+            "warnings": warnings,
+        }
+        metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=True, default=str) + "\n")
         report_path = render_pdf_report(
             report_path=artifact_dir / "report.pdf",
             artifact_dir=artifact_dir,
+            metadata_path=metadata_path,
             original_url=initial_url,
             task=task,
             final_url=final_url,
             report=report,
             screenshots=screenshots,
             request_id=request_id,
+            task_id=task_id,
+            node_profile=node_profile,
         )
         info("finalUrl", final_url)
         info("screenshots", screenshots)
         info("reportPath", project_relative(report_path))
+        info("metadataPath", project_relative(metadata_path))
+        info("status", report.get("completionStatus", "completed"))
+        info("summary", report.get("executiveSummary", ""))
     except Exception as error:
         fail(str(error))
     finally:

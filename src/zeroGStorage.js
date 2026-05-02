@@ -12,6 +12,15 @@ const projectRoot = path.resolve(__dirname, "..");
 const DEFAULT_STORAGE_RPC_URL = "https://evmrpc-testnet.0g.ai";
 const DEFAULT_STORAGE_INDEXER_RPC = "https://indexer-storage-testnet-turbo.0g.ai";
 
+function normalizeUploadMode(env = process.env) {
+  const mode = String(env.ZERO_G_UPLOAD_MODE ?? "disabled").trim().toLowerCase();
+  if (["real", "disabled"].includes(mode)) {
+    return mode;
+  }
+
+  throw new Error(`Invalid ZERO_G_UPLOAD_MODE=${env.ZERO_G_UPLOAD_MODE}. Expected real or disabled.`);
+}
+
 function formatError(error, walletAddress) {
   const message = error instanceof Error ? error.message : String(error);
   if (message.toLowerCase().includes("insufficient funds")) {
@@ -28,10 +37,13 @@ function formatError(error, walletAddress) {
 }
 
 export function resolveZeroGStorageConfig(env = process.env) {
+  const uploadMode = normalizeUploadMode(env);
   return {
-    privateKey: env.ZEROG_PRIVATE_KEY,
-    storageRpcUrl: env.ZEROG_STORAGE_RPC_URL ?? DEFAULT_STORAGE_RPC_URL,
-    storageIndexerRpc: env.ZEROG_STORAGE_INDEXER_RPC ?? DEFAULT_STORAGE_INDEXER_RPC
+    uploadMode,
+    privateKey: env.ZERO_G_PRIVATE_KEY ?? env.ZEROG_PRIVATE_KEY,
+    storageRpcUrl: env.ZERO_G_STORAGE_RPC_URL ?? env.ZEROG_STORAGE_RPC_URL,
+    storageIndexerRpc: env.ZERO_G_STORAGE_INDEXER_URL ?? env.ZEROG_STORAGE_INDEXER_RPC,
+    storageLogLevel: env.ZERO_G_STORAGE_LOG_LEVEL ?? "info"
   };
 }
 
@@ -39,28 +51,47 @@ export function validateZeroGStorageConfig(env = process.env) {
   const config = resolveZeroGStorageConfig(env);
   const missing = [];
 
-  if (!config.privateKey) {
-    missing.push("ZEROG_PRIVATE_KEY");
+  if (config.uploadMode === "real") {
+    if (!config.storageRpcUrl) {
+      missing.push("ZERO_G_STORAGE_RPC_URL");
+    }
+
+    if (!config.storageIndexerRpc) {
+      missing.push("ZERO_G_STORAGE_INDEXER_URL");
+    }
+
+    if (!config.privateKey) {
+      missing.push("ZERO_G_PRIVATE_KEY");
+    }
   }
 
   return {
     ok: missing.length === 0,
     missing,
-    config
+    config: {
+      ...config,
+      storageRpcUrl: config.storageRpcUrl ?? DEFAULT_STORAGE_RPC_URL,
+      storageIndexerRpc: config.storageIndexerRpc ?? DEFAULT_STORAGE_INDEXER_RPC
+    },
+    configured: config.uploadMode === "disabled" || missing.length === 0
   };
 }
 
-export async function uploadReportToZeroGStorage(reportPath, env = process.env) {
-  const validation = validateZeroGStorageConfig(env);
-  if (!validation.ok) {
-    throw new Error(
-      `Missing 0G Storage configuration: ${validation.missing.join(", ")}`
-    );
+function resolveLocalPath(filePath) {
+  if (!filePath) {
+    return null;
   }
 
-  const absoluteReportPath = path.isAbsolute(reportPath)
-    ? reportPath
-    : path.resolve(projectRoot, reportPath);
+  return path.isAbsolute(filePath) ? filePath : path.resolve(projectRoot, filePath);
+}
+
+async function uploadFileToZeroGStorage(filePath, env = process.env) {
+  const validation = validateZeroGStorageConfig(env);
+  if (!validation.ok) {
+    throw new Error("0G upload requested but missing ZERO_G_* env vars.");
+  }
+
+  const absoluteReportPath = resolveLocalPath(filePath);
 
   if (!existsSync(absoluteReportPath)) {
     throw new Error(`Report PDF not found at ${absoluteReportPath}`);
@@ -100,8 +131,8 @@ export async function uploadReportToZeroGStorage(reportPath, env = process.env) 
     }
 
     return {
-      reportHash: result.rootHash,
-      reportUri: `0g://${result.rootHash}`,
+      hash: result.rootHash,
+      uri: `0g://${result.rootHash}`,
       localRootHash: rootHash,
       txHash: result.txHash || null,
       txSeq: result.txSeq ?? null,
@@ -111,4 +142,41 @@ export async function uploadReportToZeroGStorage(reportPath, env = process.env) 
   } finally {
     await file.close();
   }
+}
+
+export async function uploadReportToZeroGStorage({ reportPath, metadataPath }, env = process.env) {
+  const validation = validateZeroGStorageConfig(env);
+
+  if (validation.config.uploadMode === "disabled") {
+    return {
+      uploadMode: "disabled",
+      status: "disabled",
+      reportUri: null,
+      metadataUri: null,
+      reportHash: null,
+      metadataHash: null,
+      reportPath,
+      metadataPath
+    };
+  }
+
+  if (!validation.ok) {
+    throw new Error("0G upload requested but missing ZERO_G_* env vars.");
+  }
+
+  const reportUpload = await uploadFileToZeroGStorage(reportPath, env);
+  const metadataUpload = metadataPath ? await uploadFileToZeroGStorage(metadataPath, env) : null;
+
+  return {
+    uploadMode: "real",
+    status: "uploaded",
+    reportHash: reportUpload.hash,
+    reportUri: reportUpload.uri,
+    metadataHash: metadataUpload?.hash ?? null,
+    metadataUri: metadataUpload?.uri ?? null,
+    txHash: reportUpload.txHash,
+    metadataTxHash: metadataUpload?.txHash ?? null,
+    storageRpcUrl: reportUpload.storageRpcUrl,
+    storageIndexerRpc: reportUpload.storageIndexerRpc
+  };
 }

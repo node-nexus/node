@@ -13,7 +13,10 @@ function resolveArtifactPath(artifactPath) {
 }
 
 export function applyArtifactRetention({ screenshots }, env = process.env) {
-  if (String(env.ARTIFACT_RETENTION ?? "keep").trim().toLowerCase() !== "delete_screenshots") {
+  if (
+    String(env.ARTIFACT_RETENTION ?? "keep").trim().toLowerCase() !==
+    "delete_screenshots_after_upload"
+  ) {
     return;
   }
 

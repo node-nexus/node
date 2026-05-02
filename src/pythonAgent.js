@@ -80,7 +80,16 @@ function requirePythonAgent(requestId) {
   );
 }
 
-export function runPythonAgent({ url, task, requestId }) {
+export function runPythonAgent({
+  url,
+  task,
+  requestId,
+  taskId,
+  nodeProfile,
+  reportType,
+  requestedBy,
+  targetLocation
+}) {
   return new Promise((resolve, reject) => {
     try {
       requirePythonAgent(requestId);
@@ -96,7 +105,23 @@ export function runPythonAgent({ url, task, requestId }) {
 
     execFile(
       venvPython,
-      [agentPath, url, task, "--request-id", requestId],
+      [
+        agentPath,
+        url,
+        task,
+        "--request-id",
+        requestId,
+        "--task-id",
+        taskId,
+        "--node-profile-json",
+        JSON.stringify(nodeProfile ?? {}),
+        "--report-type",
+        reportType ?? "webops-local-ux",
+        "--requested-by",
+        requestedBy ?? "",
+        "--target-location",
+        targetLocation ?? ""
+      ],
       {
         cwd: projectRoot,
         env: process.env,
@@ -131,17 +156,23 @@ export function runPythonAgent({ url, task, requestId }) {
 
         const reportPath = successLine.slice("SUCCESS|".length).trim();
         const info = parsePythonInfo(stdout);
+        const { status: completionStatus, ...logInfo } = info;
         logStep(requestId, "python-agent", "success", {
           reportPath,
-          ...info,
+          ...logInfo,
+          completionStatus,
           stderr: stderr.trim() ? truncate(stderr.trim()) : undefined
         });
 
         resolve({
+          taskId: info.taskId || taskId,
           reportPath: info.reportPath || reportPath,
           artifactDir: info.artifactDir,
+          metadataPath: info.metadataPath,
           screenshots: Array.isArray(info.screenshots) ? info.screenshots : [],
           finalUrl: info.finalUrl,
+          status: info.status,
+          summary: info.summary,
           info,
           stdout,
           stderr

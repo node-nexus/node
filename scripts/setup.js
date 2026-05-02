@@ -1,28 +1,25 @@
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import dotenv from "dotenv";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, "..");
 
+dotenv.config({ path: path.join(projectRoot, ".env") });
+
 const axlDir = path.join(projectRoot, "bin", "axl-core");
 const axlBinary = path.join(axlDir, "axl-client");
+const axlNodeBinary = path.join(axlDir, "node");
+const axlConfigPath = path.join(axlDir, "node-config.json");
+const axlPrivateKeyPath = path.join(axlDir, "private.pem");
+const axlSourceDir = path.join(projectRoot, "vendor", "axl");
 const pythonAgentDir = path.join(projectRoot, "python-agent");
 const venvDir = path.join(pythonAgentDir, "venv");
 const requirementsPath = path.join(pythonAgentDir, "requirements.txt");
-
-const platformMap = {
-  darwin: "darwin",
-  linux: "linux",
-  win32: "windows"
-};
-
-const archMap = {
-  arm64: "arm64",
-  x64: "amd64"
-};
 
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
@@ -36,39 +33,98 @@ function run(command, options = {}) {
   });
 }
 
+function commandExists(command) {
+  try {
+    execSync(`command -v ${shellQuote(command)}`, {
+      cwd: projectRoot,
+      stdio: "ignore",
+      shell: "/bin/sh"
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function shouldRequireRealAxl() {
   return process.env.REQUIRE_REAL_AXL === "true";
 }
 
-function resolveAxlDownloadUrl() {
-  const platform = platformMap[process.platform];
-  const arch = archMap[process.arch] ?? process.arch;
-
-  if (!platform) {
-    throw new Error(`Unsupported platform for AXL binary download: ${process.platform}`);
+function isMockShim(binaryPath) {
+  if (!existsSync(binaryPath)) {
+    return false;
   }
 
-  const baseUrl =
-    process.env.AXL_RELEASE_BASE_URL ??
-    "https://github.com/gensyn-ai/axl/releases/latest/download";
-  const extension = process.platform === "win32" ? ".exe" : "";
-
-  return `${baseUrl}/axl-client-${platform}-${arch}${extension}`;
+  try {
+    return readFileSync(binaryPath, "utf8").includes("node nexus axl shim");
+  } catch {
+    return false;
+  }
 }
 
-function createAxlShim(downloadUrl) {
+function isRealAxlBinary(binaryPath) {
+  return existsSync(binaryPath) && !isMockShim(binaryPath);
+}
+
+function parseMcpForwardUrl() {
+  const fallback = "http://127.0.0.1:8080/mcp/execute";
+  const value = process.env.AXL_MCP_FORWARD_URL || `http://127.0.0.1:${process.env.PORT ?? 8080}/mcp/execute`;
+  const parsed = new URL(value || fallback);
+  return {
+    routerAddr: `${parsed.protocol}//${parsed.hostname}`,
+    routerPort: Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80))
+  };
+}
+
+function writeAxlConfig() {
+  const { routerAddr, routerPort } = parseMcpForwardUrl();
+  const peers = String(process.env.AXL_PEERS ?? "")
+    .split(",")
+    .map((peer) => peer.trim())
+    .filter(Boolean);
+  const listen = String(process.env.AXL_LISTEN ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const config = {
+    PrivateKeyPath: axlPrivateKeyPath,
+    Peers: peers,
+    Listen: listen,
+    router_addr: routerAddr,
+    router_port: routerPort
+  };
+
+  writeFileSync(axlConfigPath, `${JSON.stringify(config, null, 2)}\n`);
+  console.log(`Wrote AXL config to ${path.relative(projectRoot, axlConfigPath)}`);
+}
+
+function ensureAxlPrivateKey() {
+  if (existsSync(axlPrivateKeyPath)) {
+    console.log("AXL private key already exists; reusing bin/axl-core/private.pem");
+    return;
+  }
+
+  if (!commandExists("openssl")) {
+    throw new Error("openssl is required to generate the AXL ed25519 private key.");
+  }
+
+  console.log("Generating AXL ed25519 private key at bin/axl-core/private.pem");
+  run(`openssl genpkey -algorithm ed25519 -out ${shellQuote(axlPrivateKeyPath)}`);
+}
+
+function createAxlShim(reason) {
   const shim = `#!/usr/bin/env bash
 set -euo pipefail
 
-echo "[pookie axl shim] Real Gensyn AXL binary was not available during setup."
-echo "[pookie axl shim] Original download URL: ${downloadUrl}"
-echo "[pookie axl shim] Args: $*"
-echo "[pookie axl shim] Mock mesh online. Forward target should be http://localhost:8080/mcp/execute"
+echo "[node nexus axl shim] Real Gensyn AXL binary was not available during setup."
+echo "[node nexus axl shim] Reason: ${reason}"
+echo "[node nexus axl shim] Args: $*"
+echo "[node nexus axl shim] AXL mock mode online. Forward target should be http://localhost:8080/mcp/execute"
 
-trap 'echo "[pookie axl shim] shutting down"; exit 0' INT TERM
+trap 'echo "[node nexus axl shim] shutting down"; exit 0' INT TERM
 
 while true; do
-  echo "[pookie axl shim] heartbeat: waiting for mesh tasks"
+  echo "[node nexus axl shim] heartbeat: waiting for mesh tasks"
   sleep 30
 done
 `;
@@ -79,33 +135,70 @@ done
 
 function installAxl() {
   mkdirSync(axlDir, { recursive: true });
-  const downloadUrl = resolveAxlDownloadUrl();
 
-  console.log(`Downloading Gensyn AXL binary from ${downloadUrl}`);
+  const configuredBinary = process.env.AXL_BINARY_PATH;
+  if (configuredBinary && isRealAxlBinary(path.resolve(projectRoot, configuredBinary))) {
+    console.log(`AXL binary already configured at ${configuredBinary}; skipping build.`);
+    ensureAxlPrivateKey();
+    writeAxlConfig();
+    return;
+  }
+
+  if (isRealAxlBinary(axlNodeBinary)) {
+    console.log("Real AXL node binary already exists at bin/axl-core/node; skipping build.");
+    ensureAxlPrivateKey();
+    writeAxlConfig();
+    return;
+  }
+
+  if (process.env.SKIP_AXL_BUILD === "true") {
+    const reason = "SKIP_AXL_BUILD=true";
+    if (shouldRequireRealAxl()) {
+      throw new Error(`Real AXL required but ${reason}.`);
+    }
+    console.warn(`${reason}; creating AXL mock shim.`);
+    createAxlShim(reason);
+    return;
+  }
 
   try {
-    run(`curl -fL ${shellQuote(downloadUrl)} -o ${shellQuote(axlBinary)}`);
-    run(`chmod +x ${shellQuote(axlBinary)}`);
+    if (!commandExists("git")) {
+      throw new Error("git is required to clone gensyn-ai/axl.");
+    }
+    if (!commandExists("go")) {
+      throw new Error("Go 1.25.5+ is required to build gensyn-ai/axl.");
+    }
+
+    mkdirSync(path.dirname(axlSourceDir), { recursive: true });
+    if (!existsSync(axlSourceDir)) {
+      console.log("Cloning Gensyn AXL from https://github.com/gensyn-ai/axl");
+      run(`git clone --depth 1 https://github.com/gensyn-ai/axl ${shellQuote(axlSourceDir)}`);
+    } else {
+      console.log("AXL source already exists at vendor/axl; refreshing main branch.");
+      run("git fetch --depth 1 origin main", { cwd: axlSourceDir });
+      run("git checkout -f FETCH_HEAD", { cwd: axlSourceDir });
+    }
+
+    console.log("Building Gensyn AXL node with Go toolchain pinned by upstream AXL");
+    run(`GOTOOLCHAIN=go1.25.5 go build -o ${shellQuote(axlNodeBinary)} ./cmd/node`, {
+      cwd: axlSourceDir
+    });
+    run(`chmod +x ${shellQuote(axlNodeBinary)}`);
+    ensureAxlPrivateKey();
+    writeAxlConfig();
   } catch (error) {
-    if (existsSync(axlBinary)) {
-      unlinkSync(axlBinary);
+    if (existsSync(axlNodeBinary)) {
+      rmSync(axlNodeBinary, { force: true });
     }
 
     if (shouldRequireRealAxl()) {
-      throw new Error(
-        [
-          "Failed to download the Gensyn AXL binary.",
-          `Tried: ${downloadUrl}`,
-          "If no release binary exists yet, download/build AXL manually and place it at bin/axl-core/axl-client,",
-          "or rerun with AXL_RELEASE_BASE_URL pointing at a release that contains axl-client-{platform}-{arch}."
-        ].join("\n")
-      );
+      throw error;
     }
 
-    console.warn("Failed to download the Gensyn AXL binary; creating a local hackathon shim instead.");
-    console.warn(`Tried: ${downloadUrl}`);
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(`Failed to build real Gensyn AXL; creating AXL mock shim. Reason: ${reason}`);
     console.warn("Set REQUIRE_REAL_AXL=true to fail setup instead of using the shim.");
-    createAxlShim(downloadUrl);
+    createAxlShim(reason);
   }
 }
 
@@ -141,7 +234,7 @@ function main() {
   console.log(`Detected platform=${process.platform}, arch=${process.arch}`);
   installAxl();
   installPythonAgent();
-  console.log("Pookie Node setup complete.");
+  console.log("Node Nexus setup complete.");
 }
 
 main();

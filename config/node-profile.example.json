@@ -1,0 +1,19 @@
+{
+  "nodeId": "node-nexus-in-mumbai-001",
+  "displayName": "Node Nexus Mumbai",
+  "country": "IN",
+  "region": "Maharashtra",
+  "city": "Mumbai",
+  "timezone": "Asia/Kolkata",
+  "languages": ["en-IN", "hi"],
+  "capabilities": [
+    "browser-use",
+    "qwen-agent",
+    "screenshots",
+    "pdf-report",
+    "0g-storage-upload",
+    "axl-mesh"
+  ],
+  "networkType": "operator-local",
+  "operatorNotes": "Runs from local residential or operator-controlled network."
+}
