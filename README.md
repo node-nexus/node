@@ -34,6 +34,8 @@ Global web behavior is local. Consent banners, language, search results, CDN rou
 - `AXL_MODE=disabled`: local HTTP API only.
 - `AXL_MODE=mock`: starts the local setup shim and labels all mesh behavior as mock.
 - `AXL_MODE=real`: starts a real AXL binary and fails clearly if missing.
+- `NODE_NEXUS_ROLE=gateway`: exposes hosted gateway APIs for non-node users.
+- `NODE_NEXUS_ROLE=operator`: runs as a remote report-producing operator node.
 - `ZERO_G_UPLOAD_MODE=disabled`: returns local report paths, no fake hash.
 - `ZERO_G_UPLOAD_MODE=real`: uploads report and metadata using 0G Storage credentials.
 
@@ -100,6 +102,15 @@ ZERO_G_PRIVATE_KEY=... \
 npm start
 ```
 
+Hosted gateway API plus frontend:
+
+```bash
+NODE_NEXUS_ROLE=gateway AXL_MODE=real npm start
+NEXT_PUBLIC_NODE_NEXUS_API_URL=http://localhost:8080 npm run web:dev
+```
+
+The frontend runs from `web/` and lets non-node users submit tasks through the gateway node. The gateway still sends remote tasks through local AXL; it is not a replacement transport.
+
 ## API Examples
 
 Health:
@@ -120,6 +131,29 @@ AXL status:
 curl http://localhost:8080/axl/status
 ```
 
+Gateway tasks:
+
+```bash
+curl -X POST http://localhost:8080/gateway/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com",
+    "task": "Check local UX and produce a report.",
+    "targetLocations": ["IN"],
+    "selectionMode": "auto",
+    "maxTargets": 1,
+    "reportType": "webops-local-ux"
+  }'
+```
+
+Fresh AXL peer discovery:
+
+```bash
+curl http://localhost:8080/gateway/peers
+```
+
+The gateway does not keep a centralized node registry. `/gateway/peers` probes current AXL topology and calls `node_nexus.profile` on peers at request time. `/gateway/tasks` can auto-select from that fresh scan when `targetNodes` is omitted. Use `selectionMode: "ai"` to let Qwen select peers through the 0G router; if Qwen credentials are unavailable, the gateway falls back to deterministic live selection.
+
 Run a local WebOps task:
 
 ```bash
@@ -133,7 +167,7 @@ curl -X POST http://localhost:8080/mcp/execute \
   }'
 ```
 
-Dispatch skeleton:
+Explicit peer dispatch:
 
 ```bash
 curl -X POST http://localhost:8080/axl/dispatch \
@@ -147,7 +181,15 @@ curl -X POST http://localhost:8080/axl/dispatch \
   }'
 ```
 
-In real AXL mode, dispatch requires a configured real AXL local API. Node Nexus does not fake remote delivery.
+In real AXL mode, dispatch uses `POST ${AXL_API_URL}/mcp/{peerId}/node-nexus`. Node Nexus does not fake remote delivery.
+
+Inbound AXL MCP uses:
+
+```text
+POST /route
+service: node-nexus
+method: node_nexus.execute | node_nexus.profile | node_nexus.report
+```
 
 ## Artifact Layout
 
@@ -172,8 +214,9 @@ artifacts/
 ## Known Limitations
 
 - Qwen JSON can be unstable; the agent normalizes browser-use actions and falls back to a deterministic report summary if report analysis fails.
+- Qwen peer selection is optional and uses only the 0G OpenAI-compatible router.
 - YouTube and complex SPAs can be slow.
-- Real mesh mode requires a real AXL binary and compatible local API for remote dispatch.
+- Real mesh mode requires a real AXL binary and at least one reachable AXL peer.
 - Real 0G upload requires funded 0G credentials.
 
 ## Demo Script
@@ -181,7 +224,7 @@ artifacts/
 1. Start Node A:
    `AXL_MODE=mock ZERO_G_UPLOAD_MODE=disabled PORT=8080 npm start`
 2. Start Node B from another checkout or terminal with a different port/profile.
-3. Submit `/mcp/execute` locally or call `/axl/dispatch` in mock mode.
+3. Open the web console or call `/gateway/tasks` with no `targetNodes` to auto-select live peers.
 4. Inspect `artifacts/<taskId>/report.pdf` and `metadata.json`.
 5. Enable `ZERO_G_UPLOAD_MODE=real` with credentials to collect real `0g://...` report URIs.
 

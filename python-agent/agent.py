@@ -7,6 +7,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 from openai import APIConnectionError, APIStatusError, RateLimitError
 from pydantic import BaseModel
@@ -345,6 +346,24 @@ def browser_use_actions_from_simple(action: Any) -> list[dict[str, Any]]:
         repaired_actions = []
         input_index = params.get("input", params.get("index"))
         text = params.get("text")
+        search_text = text or params.get("send_keys") or params.get("keys")
+        if (
+            search_text
+            and "send_keys" in name
+            and input_index is None
+            and any(word in ACTIVE_USER_TASK.lower() for word in ("search", "searching", "result", "results"))
+            and "youtube.com" in ACTIVE_INITIAL_URL.lower()
+        ):
+            return [
+                normalize_action_item(
+                    {
+                        "navigate": {
+                            "url": f"https://www.youtube.com/results?search_query={quote_plus(str(search_text).strip())}"
+                        }
+                    }
+                )
+            ]
+
         has_input_intent = "input" in name
         if has_input_intent and input_index is not None and text:
             repaired_actions.append(
@@ -454,7 +473,23 @@ def should_complete_visible_results(action: Any, context: str) -> bool:
 
     task = ACTIVE_USER_TASK.lower()
     context_lower = context.lower()
-    if not any(word in task for word in ("screenshot", "proof", "capture")):
+    wants_evidence_page = any(
+        word in task
+        for word in (
+            "screenshot",
+            "proof",
+            "capture",
+            "check",
+            "inspect",
+            "observe",
+            "observation",
+            "review",
+            "report",
+            "result",
+            "search",
+        )
+    )
+    if not wants_evidence_page:
         return False
 
     name = str(action.get("name") or action.get("action") or action.get("type") or "").lower()
@@ -610,11 +645,53 @@ def compact_browser_context(openai_messages: list[dict[str, Any]]) -> str:
 def completion_hint(browser_context: str) -> str:
     task = ACTIVE_USER_TASK.lower()
     context = browser_context.lower()
+    is_search_task = any(word in task for word in ("search", "searching", "result", "results"))
+    search_results_visible = (
+        "youtube.com/results" in context
+        or "search_query=" in context
+        or ("weather" in task and "weather" in context)
+    )
+
+    webops_observation_task = any(
+        word in task
+        for word in (
+            "check",
+            "inspect",
+            "local ux",
+            "ux",
+            "report",
+            "observe",
+            "observation",
+            "review",
+            "webops",
+        )
+    )
+    page_has_visible_content = any(
+        token in context
+        for token in (
+            "page title",
+            "text:",
+            "link",
+            "button",
+            "input",
+            "example domain",
+            "learn more",
+        )
+    )
+    if is_search_task and not search_results_visible:
+        return ""
+
+    if webops_observation_task and page_has_visible_content:
+        return (
+            "\n\nImportant: this is a WebOps observation/report task. Once the submitted page is loaded and "
+            "there is visible content to support local UX observations, choose action name done with success true. "
+            "The report-analysis step will produce the detailed PDF from the final page, screenshot, and action history."
+        )
 
     if not any(word in task for word in ("screenshot", "proof", "capture")):
         return ""
 
-    if "youtube.com/results" in context or "search_query=" in context:
+    if search_results_visible:
         return (
             "\n\nImportant: the browser is already on a YouTube results page for this screenshot task. "
             "If the requested results are visible, choose action name done now."

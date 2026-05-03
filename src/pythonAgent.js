@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -80,6 +80,30 @@ function requirePythonAgent(requestId) {
   );
 }
 
+function writePythonAgentLog({ taskId, stdout, stderr }) {
+  const safeTaskId = String(taskId || "manual")
+    .replace(/[^A-Za-z0-9_.-]+/g, "-")
+    .slice(0, 120) || "manual";
+  const artifactDir = path.join(projectRoot, "artifacts", safeTaskId);
+  const logPath = path.join(artifactDir, "python-agent.log");
+
+  mkdirSync(artifactDir, { recursive: true });
+  writeFileSync(
+    logPath,
+    [
+      "=== stdout ===",
+      stdout.trim(),
+      "",
+      "=== stderr ===",
+      stderr.trim(),
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+
+  return path.relative(projectRoot, logPath);
+}
+
 export function runPythonAgent({
   url,
   task,
@@ -129,11 +153,14 @@ export function runPythonAgent({
         maxBuffer: 1024 * 1024 * 10
       },
       (error, stdout, stderr) => {
+        const pythonLogPath = writePythonAgentLog({ taskId, stdout, stderr });
+
         if (error) {
           const pythonError = parsePythonError(stdout);
           const details = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
           logStep(requestId, "python-agent", "fail", {
             error: truncate(pythonError || details || error.message),
+            pythonLogPath,
             exitCode: error.code ?? null,
             signal: error.signal ?? null
           });
@@ -148,6 +175,7 @@ export function runPythonAgent({
         if (!successLine) {
           logStep(requestId, "python-agent", "fail", {
             reason: "missing-success-marker",
+            pythonLogPath,
             stdout: truncate(stdout)
           });
           reject(new Error(`Python agent did not return SUCCESS marker. stdout: ${stdout}`));
@@ -161,6 +189,7 @@ export function runPythonAgent({
           reportPath,
           ...logInfo,
           completionStatus,
+          pythonLogPath,
           stderr: stderr.trim() ? truncate(stderr.trim()) : undefined
         });
 
@@ -173,6 +202,7 @@ export function runPythonAgent({
           finalUrl: info.finalUrl,
           status: info.status,
           summary: info.summary,
+          pythonLogPath,
           info,
           stdout,
           stderr

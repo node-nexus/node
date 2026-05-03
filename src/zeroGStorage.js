@@ -11,6 +11,8 @@ const projectRoot = path.resolve(__dirname, "..");
 
 const DEFAULT_STORAGE_RPC_URL = "https://evmrpc-testnet.0g.ai";
 const DEFAULT_STORAGE_INDEXER_RPC = "https://indexer-storage-testnet-turbo.0g.ai";
+const DEFAULT_STORAGE_DOWNLOAD_BASE_URL = "https://indexer-storage-testnet-turbo.0g.ai";
+const DEFAULT_UPLOAD_TIMEOUT_MS = 600000;
 
 function normalizeUploadMode(env = process.env) {
   const mode = String(env.ZERO_G_UPLOAD_MODE ?? "disabled").trim().toLowerCase();
@@ -36,6 +38,25 @@ function formatError(error, walletAddress) {
   return message;
 }
 
+function positiveInt(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+async function withTimeout(promise, timeoutMs, message) {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export function resolveZeroGStorageConfig(env = process.env) {
   const uploadMode = normalizeUploadMode(env);
   return {
@@ -43,7 +64,14 @@ export function resolveZeroGStorageConfig(env = process.env) {
     privateKey: env.ZERO_G_PRIVATE_KEY ?? env.ZEROG_PRIVATE_KEY,
     storageRpcUrl: env.ZERO_G_STORAGE_RPC_URL ?? env.ZEROG_STORAGE_RPC_URL,
     storageIndexerRpc: env.ZERO_G_STORAGE_INDEXER_URL ?? env.ZEROG_STORAGE_INDEXER_RPC,
-    storageLogLevel: env.ZERO_G_STORAGE_LOG_LEVEL ?? "info"
+    storageDownloadBaseUrl:
+      env.ZERO_G_STORAGE_DOWNLOAD_BASE_URL ??
+      env.ZEROG_STORAGE_DOWNLOAD_BASE_URL ??
+      env.ZERO_G_STORAGE_INDEXER_URL ??
+      env.ZEROG_STORAGE_INDEXER_RPC,
+    storageLogLevel: env.ZERO_G_STORAGE_LOG_LEVEL ?? "info",
+    uploadTimeoutMs: positiveInt(env.ZERO_G_UPLOAD_TIMEOUT_MS, DEFAULT_UPLOAD_TIMEOUT_MS),
+    expectedReplica: positiveInt(env.ZERO_G_EXPECTED_REPLICA, 1)
   };
 }
 
@@ -71,10 +99,25 @@ export function validateZeroGStorageConfig(env = process.env) {
     config: {
       ...config,
       storageRpcUrl: config.storageRpcUrl ?? DEFAULT_STORAGE_RPC_URL,
-      storageIndexerRpc: config.storageIndexerRpc ?? DEFAULT_STORAGE_INDEXER_RPC
+      storageIndexerRpc: config.storageIndexerRpc ?? DEFAULT_STORAGE_INDEXER_RPC,
+      storageDownloadBaseUrl: config.storageDownloadBaseUrl ?? DEFAULT_STORAGE_DOWNLOAD_BASE_URL
     },
     configured: config.uploadMode === "disabled" || missing.length === 0
   };
+}
+
+function buildIndexerDownloadUrl(baseUrl, rootHash, fileName) {
+  if (!baseUrl || !rootHash) {
+    return null;
+  }
+  const parsed = new URL(baseUrl);
+  parsed.pathname = `${parsed.pathname.replace(/\/+$/, "")}/file`;
+  parsed.search = "";
+  parsed.searchParams.set("root", rootHash);
+  if (fileName) {
+    parsed.searchParams.set("name", fileName);
+  }
+  return parsed.toString();
 }
 
 function resolveLocalPath(filePath) {
@@ -97,11 +140,19 @@ async function uploadFileToZeroGStorage(filePath, env = process.env) {
     throw new Error(`Report PDF not found at ${absoluteReportPath}`);
   }
 
-  const { privateKey, storageRpcUrl, storageIndexerRpc } = validation.config;
+  const {
+    privateKey,
+    storageRpcUrl,
+    storageIndexerRpc,
+    storageDownloadBaseUrl,
+    uploadTimeoutMs,
+    expectedReplica
+  } = validation.config;
   const provider = new ethers.JsonRpcProvider(storageRpcUrl);
   const signer = new ethers.Wallet(privateKey, provider);
   const indexer = new Indexer(storageIndexerRpc);
   const file = await ZgFile.fromFilePath(absoluteReportPath);
+  const fileName = path.basename(absoluteReportPath);
 
   try {
     const [tree, treeError] = await file.merkleTree();
@@ -116,8 +167,21 @@ async function uploadFileToZeroGStorage(filePath, env = process.env) {
 
     let result;
     let uploadError;
+    const uploadOptions = {
+      finalityRequired: true,
+      expectedReplica,
+      skipTx: true,
+      skipIfFinalized: true,
+      onProgress: (message) => {
+        console.log(`[0g-storage] ${fileName}: ${message}`);
+      }
+    };
     try {
-      [result, uploadError] = await indexer.upload(file, storageRpcUrl, signer);
+      [result, uploadError] = await withTimeout(
+        indexer.upload(file, storageRpcUrl, signer, uploadOptions),
+        uploadTimeoutMs,
+        `0G Storage upload timed out after ${uploadTimeoutMs}ms while waiting for storage finalization`
+      );
     } catch (error) {
       throw new Error(`0G Storage upload failed: ${formatError(error, signer.address)}`);
     }
@@ -133,11 +197,14 @@ async function uploadFileToZeroGStorage(filePath, env = process.env) {
     return {
       hash: result.rootHash,
       uri: `0g://${result.rootHash}`,
+      downloadUrl: buildIndexerDownloadUrl(storageDownloadBaseUrl, result.rootHash, fileName),
       localRootHash: rootHash,
       txHash: result.txHash || null,
       txSeq: result.txSeq ?? null,
       storageRpcUrl,
-      storageIndexerRpc
+      storageIndexerRpc,
+      expectedReplica,
+      finalityRequired: true
     };
   } finally {
     await file.close();
@@ -153,6 +220,8 @@ export async function uploadReportToZeroGStorage({ reportPath, metadataPath }, e
       status: "disabled",
       reportUri: null,
       metadataUri: null,
+      reportDownloadUrl: null,
+      metadataDownloadUrl: null,
       reportHash: null,
       metadataHash: null,
       reportPath,
@@ -172,8 +241,10 @@ export async function uploadReportToZeroGStorage({ reportPath, metadataPath }, e
     status: "uploaded",
     reportHash: reportUpload.hash,
     reportUri: reportUpload.uri,
+    reportDownloadUrl: reportUpload.downloadUrl ?? null,
     metadataHash: metadataUpload?.hash ?? null,
     metadataUri: metadataUpload?.uri ?? null,
+    metadataDownloadUrl: metadataUpload?.downloadUrl ?? null,
     txHash: reportUpload.txHash,
     metadataTxHash: metadataUpload?.txHash ?? null,
     storageRpcUrl: reportUpload.storageRpcUrl,

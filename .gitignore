@@ -1,5 +1,36 @@
 node_modules/
+web/node_modules/
+web/.next/
 .env
+.env.*
+!.env.example
+
+# Sensitive local access and secrets
+.ssh/
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.csr
+*.ovpn
+*.wg
+wireguard/
+wg*.conf
+config/*secret*
+config/*credential*
+config/*credentials*
+config/*profile*.json
+*vps-access*
+*VPS-access*
+*vps-credential*
+*VPS-credential*
+*vps-secret*
+*VPS-secret*
 
 # Python sidecar artifacts
 python-agent/venv/
@@ -8,12 +39,14 @@ __pycache__/
 
 # Runtime outputs
 artifacts/
+data/
 *.log
 
 # Downloaded AXL binary
 bin/axl-core/axl-client
 bin/axl-core/node
 bin/axl-core/private.pem
+bin/axl-core/key-backups/
 bin/axl-core/node-config.json
 vendor/axl/
 

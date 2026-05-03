@@ -29,7 +29,7 @@ function resolveAxlBinary(env, mode) {
     return DEFAULT_AXL_NODE_BINARY;
   }
 
-  return existsSync(DEFAULT_AXL_NODE_BINARY) ? DEFAULT_AXL_NODE_BINARY : DEFAULT_AXL_SHIM_BINARY;
+  return DEFAULT_AXL_SHIM_BINARY;
 }
 
 function resolveAxlConfig(env) {

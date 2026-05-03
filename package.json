@@ -10,7 +10,10 @@
   "scripts": {
     "check:0g": "node scripts/check-0g.js",
     "setup": "node scripts/setup.js",
-    "start": "node bin/pookie.js"
+    "start": "node bin/pookie.js",
+    "web:dev": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
+    "web:start": "npm --prefix web run start"
   },
   "keywords": [
     "web3",

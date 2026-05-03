@@ -20,6 +20,7 @@ const axlSourceDir = path.join(projectRoot, "vendor", "axl");
 const pythonAgentDir = path.join(projectRoot, "python-agent");
 const venvDir = path.join(pythonAgentDir, "venv");
 const requirementsPath = path.join(pythonAgentDir, "requirements.txt");
+const webDir = path.join(projectRoot, "web");
 
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
@@ -62,8 +63,41 @@ function isMockShim(binaryPath) {
   }
 }
 
+function binaryLooksCompatible(binaryPath) {
+  if (!existsSync(binaryPath)) {
+    return false;
+  }
+
+  if (!commandExists("file")) {
+    return true;
+  }
+
+  try {
+    const description = execSync(`file ${shellQuote(binaryPath)}`, {
+      cwd: projectRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      shell: "/bin/sh"
+    });
+
+    if (process.platform === "linux") {
+      return description.includes("ELF");
+    }
+
+    if (process.platform === "darwin") {
+      const archMatches =
+        process.arch === "arm64" ? description.includes("arm64") : description.includes("x86_64");
+      return description.includes("Mach-O") && archMatches;
+    }
+
+    return true;
+  } catch {
+    return true;
+  }
+}
+
 function isRealAxlBinary(binaryPath) {
-  return existsSync(binaryPath) && !isMockShim(binaryPath);
+  return existsSync(binaryPath) && !isMockShim(binaryPath) && binaryLooksCompatible(binaryPath);
 }
 
 function parseMcpForwardUrl() {
@@ -93,6 +127,14 @@ function writeAxlConfig() {
     router_addr: routerAddr,
     router_port: routerPort
   };
+
+  if (process.env.AXL_API_PORT) {
+    config.api_port = Number(process.env.AXL_API_PORT);
+  }
+
+  if (process.env.AXL_TCP_PORT) {
+    config.tcp_port = Number(process.env.AXL_TCP_PORT);
+  }
 
   writeFileSync(axlConfigPath, `${JSON.stringify(config, null, 2)}\n`);
   console.log(`Wrote AXL config to ${path.relative(projectRoot, axlConfigPath)}`);
@@ -230,10 +272,20 @@ function installPythonAgent() {
   run(`${shellQuote(venvPython)} -m playwright install chromium`);
 }
 
+function installWebApp() {
+  if (!existsSync(path.join(webDir, "package.json"))) {
+    return;
+  }
+
+  console.log("Installing Node Nexus web console dependencies");
+  run("npm install", { cwd: webDir });
+}
+
 function main() {
   console.log(`Detected platform=${process.platform}, arch=${process.arch}`);
   installAxl();
   installPythonAgent();
+  installWebApp();
   console.log("Node Nexus setup complete.");
 }
 
