@@ -56,6 +56,9 @@ QWEN_ACTION_PROMPT = (
     "unless the page has no usable content."
 )
 MAX_QWEN_CONTEXT_CHARS = 1200
+DEFAULT_MODEL_RETRY_ATTEMPTS = 5
+DEFAULT_MODEL_RETRY_BASE_DELAY_SECONDS = 4.0
+RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
 
 
 def parse_scalar(value: str) -> str | int | float | bool:
@@ -880,6 +883,78 @@ def env_bool(name: str, default: bool) -> bool:
         return default
 
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value.strip())
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _retry_after_seconds(error: Exception) -> float | None:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+
+    retry_after = headers.get("retry-after-ms")
+    if retry_after:
+        try:
+            return max(float(retry_after) / 1000.0, 0.0)
+        except ValueError:
+            pass
+
+    retry_after = headers.get("retry-after")
+    if retry_after:
+        try:
+            return max(float(retry_after), 0.0)
+        except ValueError:
+            return None
+
+    return None
+
+
+def _is_retryable_model_error(error: Exception) -> bool:
+    if isinstance(error, (RateLimitError, APIConnectionError)):
+        return True
+
+    if isinstance(error, APIStatusError):
+        return error.status_code in RETRYABLE_STATUS_CODES
+
+    return False
+
+
+async def create_chat_completion_with_backoff(client, *, operation: str, **kwargs):
+    attempts = env_int("ZEROG_MODEL_RETRY_ATTEMPTS", DEFAULT_MODEL_RETRY_ATTEMPTS)
+    base_delay = float(os.getenv("ZEROG_MODEL_RETRY_BASE_DELAY_SECONDS", DEFAULT_MODEL_RETRY_BASE_DELAY_SECONDS))
+    last_error: Exception | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return await client.chat.completions.create(**kwargs)
+        except Exception as error:
+            last_error = error
+            if not _is_retryable_model_error(error) or attempt >= attempts:
+                raise
+
+            retry_after = _retry_after_seconds(error)
+            delay = retry_after if retry_after is not None else min(base_delay * (2 ** (attempt - 1)), 45.0)
+            delay += min(0.25 * attempt, 1.0)
+            print(
+                f"INFO|modelRetry={json.dumps({'operation': operation, 'attempt': attempt, 'maxAttempts': attempts, 'delaySeconds': round(delay, 2), 'error': str(error)[:220]}, ensure_ascii=True)}",
+                flush=True,
+            )
+            await asyncio.sleep(delay)
+
+    if last_error is not None:
+        raise last_error
+
+    raise RuntimeError(f"{operation} failed without a captured exception")
 
 
 async def main() -> None:

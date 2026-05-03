@@ -45,6 +45,8 @@ export class GatewayStore {
         target_locations TEXT NOT NULL,
         status TEXT NOT NULL,
         request_json TEXT NOT NULL,
+        payment_intent_json TEXT,
+        dispatch_started_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -65,18 +67,49 @@ export class GatewayStore {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS consumed_payment_txs (
+        tx_hash TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        payment_intent_id TEXT NOT NULL,
+        consumed_at TEXT NOT NULL
+      );
       DROP TABLE IF EXISTS known_nodes;
     `);
+    this.migrate();
   }
 
-  createTask({ taskId, url, task, reportType, targetNodes, targetLocations, request }) {
+  migrate() {
+    const columns = new Set(
+      this.db.prepare("PRAGMA table_info(gateway_tasks)").all().map((column) => column.name)
+    );
+
+    if (!columns.has("payment_intent_json")) {
+      this.db.exec("ALTER TABLE gateway_tasks ADD COLUMN payment_intent_json TEXT");
+    }
+
+    if (!columns.has("dispatch_started_at")) {
+      this.db.exec("ALTER TABLE gateway_tasks ADD COLUMN dispatch_started_at TEXT");
+    }
+  }
+
+  createTask({
+    taskId,
+    url,
+    task,
+    reportType,
+    targetNodes,
+    targetLocations,
+    request,
+    status = "payment_required",
+    paymentIntent = null
+  }) {
     const timestamp = now();
     this.db
       .prepare(
         `INSERT INTO gateway_tasks (
           task_id, url, task, report_type, target_nodes, target_locations,
-          status, request_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          status, request_json, payment_intent_json, dispatch_started_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         taskId,
@@ -85,8 +118,10 @@ export class GatewayStore {
         reportType,
         json(targetNodes, []),
         json(targetLocations, []),
-        "queued",
+        status,
         json(request, {}),
+        json(paymentIntent),
+        null,
         timestamp,
         timestamp
       );
@@ -97,6 +132,70 @@ export class GatewayStore {
     this.db
       .prepare("UPDATE gateway_tasks SET status = ?, updated_at = ? WHERE task_id = ?")
       .run(status, now(), taskId);
+  }
+
+  updateTaskPaymentIntent(taskId, paymentIntent) {
+    this.db
+      .prepare("UPDATE gateway_tasks SET payment_intent_json = ?, updated_at = ? WHERE task_id = ?")
+      .run(json(paymentIntent), now(), taskId);
+  }
+
+  updateTask({
+    taskId,
+    status,
+    paymentIntent,
+    dispatchStartedAt
+  }) {
+    const current = this.getTask(taskId);
+    if (!current) {
+      return null;
+    }
+
+    this.db
+      .prepare(
+        `UPDATE gateway_tasks
+         SET status = ?, payment_intent_json = ?, dispatch_started_at = ?, updated_at = ?
+         WHERE task_id = ?`
+      )
+      .run(
+        status ?? current.status,
+        json(paymentIntent ?? current.paymentIntent),
+        dispatchStartedAt ?? current.dispatchStartedAt ?? null,
+        now(),
+        taskId
+      );
+
+    return this.getTask(taskId);
+  }
+
+  claimTaskForDispatch(taskId) {
+    const claimedAt = now();
+    const result = this.db
+      .prepare(
+        `UPDATE gateway_tasks
+         SET dispatch_started_at = ?, updated_at = ?
+         WHERE task_id = ? AND status = 'queued' AND dispatch_started_at IS NULL`
+      )
+      .run(claimedAt, claimedAt, taskId);
+
+    return result.changes > 0;
+  }
+
+  getConsumedPaymentTx(txHash) {
+    return (
+      this.db
+        .prepare("SELECT * FROM consumed_payment_txs WHERE tx_hash = ?")
+        .get(String(txHash ?? "").toLowerCase()) ?? null
+    );
+  }
+
+  consumePaymentTx({ txHash, taskId, paymentIntentId }) {
+    this.db
+      .prepare(
+        `INSERT INTO consumed_payment_txs (tx_hash, task_id, payment_intent_id, consumed_at)
+         VALUES (?, ?, ?, ?)`
+      )
+      .run(String(txHash ?? "").toLowerCase(), taskId, paymentIntentId, now());
   }
 
   addReport({
@@ -168,6 +267,8 @@ export class GatewayStore {
       targetLocations: parse(row.target_locations, []),
       status: row.status,
       request: parse(row.request_json, {}),
+      paymentIntent: parse(row.payment_intent_json),
+      dispatchStartedAt: row.dispatch_started_at,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };

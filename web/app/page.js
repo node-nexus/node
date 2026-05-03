@@ -4,16 +4,12 @@ import {
   Activity,
   AlertCircle,
   CheckCircle2,
-  Database,
-  Globe2,
+  Coins,
   Loader2,
-  RadioTower,
   RefreshCcw,
   Route,
-  Send,
-  Server,
-  ShieldCheck,
-  Sparkles
+  Sparkles,
+  Wallet
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
@@ -21,20 +17,12 @@ import { useCallback, useEffect, useState } from "react";
 const DEFAULT_API_PORT = process.env.NEXT_PUBLIC_NODE_NEXUS_API_PORT || "8080";
 const ZERO_G_INDEXER_BASE =
   process.env.NEXT_PUBLIC_ZERO_G_INDEXER_BASE || "https://indexer-storage-testnet-turbo.0g.ai";
-
-function apiBaseUrl() {
-  const configured = process.env.NEXT_PUBLIC_NODE_NEXUS_API_URL;
-  if (configured) {
-    return configured.replace(/\/+$/, "");
-  }
-
-  if (typeof window !== "undefined") {
-    const protocol = window.location.protocol === "https:" ? "https" : "http";
-    return `${protocol}://${window.location.hostname}:${DEFAULT_API_PORT}`;
-  }
-
-  return `http://localhost:${DEFAULT_API_PORT}`;
-}
+const ZERO_G_CHAIN_ID = Number(process.env.NEXT_PUBLIC_ZERO_G_CHAIN_ID || 16602);
+const ZERO_G_CHAIN_HEX = `0x${ZERO_G_CHAIN_ID.toString(16)}`;
+const ZERO_G_CHAIN_NAME = process.env.NEXT_PUBLIC_ZERO_G_CHAIN_NAME || "0G-Testnet-Galileo";
+const ZERO_G_RPC_URL = process.env.NEXT_PUBLIC_ZERO_G_RPC_URL || "https://evmrpc-testnet.0g.ai";
+const ZERO_G_EXPLORER_URL =
+  process.env.NEXT_PUBLIC_ZERO_G_EXPLORER_URL || "https://chainscan-galileo.0g.ai";
 
 function apiBaseCandidates() {
   const configured = process.env.NEXT_PUBLIC_NODE_NEXUS_API_URL;
@@ -81,10 +69,6 @@ async function api(path, options = {}) {
   throw lastNetworkError || new Error("Failed to reach Node Nexus API.");
 }
 
-function label(value, fallback = "Not set") {
-  return value === null || value === undefined || value === "" ? fallback : value;
-}
-
 function toHttpUrl(value) {
   if (typeof value !== "string" || !value.trim()) {
     return null;
@@ -121,32 +105,75 @@ function buildIndexerDownloadUrl(rootHash, fileName = "report.pdf") {
   return `${normalizedBase}/file?root=${encodeURIComponent(rootHash)}&name=${encodeURIComponent(fileName)}`;
 }
 
-function localArtifactUrl(path) {
-  if (typeof path !== "string" || !path.trim()) {
-    return null;
-  }
-  const normalizedPath = path.trim().replace(/^\/+/, "");
-  const normalizedApi = apiBaseUrl();
-  return `${normalizedApi}/${normalizedPath}`;
-}
-
 function resolveReportLinks(report) {
+  const response = report?.response;
   const zeroGDownloadUrl =
     toHttpUrl(report?.zeroGReportDownloadUrl) ||
     toHttpUrl(report?.zeroG?.reportDownloadUrl) ||
     toHttpUrl(report?.reportLinks?.zeroGDownloadUrl) ||
-    buildIndexerDownloadUrl(parseZeroGRoot(report?.reportUri));
+    toHttpUrl(report?.reportUri) ||
+    toHttpUrl(response?.zeroGReportDownloadUrl) ||
+    toHttpUrl(response?.zeroG?.reportDownloadUrl) ||
+    toHttpUrl(response?.reportLinks?.zeroGDownloadUrl) ||
+    toHttpUrl(response?.reportUri) ||
+    buildIndexerDownloadUrl(parseZeroGRoot(report?.reportUri || response?.reportUri));
 
-  const localDownloadUrl =
-    toHttpUrl(report?.reportDownloadUrl) ||
-    toHttpUrl(report?.reportLinks?.localDownloadUrl) ||
-    localArtifactUrl(report?.reportPath);
+  return { zeroGDownloadUrl };
+}
 
-  return { zeroGDownloadUrl, localDownloadUrl };
+function visibleReports(reports = []) {
+  const latestByPeer = new Map();
+  const rank = { accepted: 0, queued: 0, dispatching: 0, running: 1, partial: 2, failed: 2, completed: 3 };
+
+  for (const report of reports) {
+    const key =
+      report?.nodeId ||
+      report?.response?.nodeId ||
+      report?.peerId ||
+      report?.response?.peerId ||
+      report?.id;
+    if (!key) {
+      continue;
+    }
+    const previous = latestByPeer.get(key);
+    const currentRank = rank[report?.status] ?? 0;
+    const previousRank = rank[previous?.status] ?? 0;
+
+    if (!previous || currentRank >= previousRank) {
+      latestByPeer.set(key, report);
+    }
+  }
+
+  return Array.from(latestByPeer.values());
+}
+
+function decimalToWeiHex(value) {
+  const [wholePart, fractionalPart = ""] = String(value ?? "").trim().split(".");
+  const whole = BigInt(wholePart || "0");
+  const fraction = BigInt((fractionalPart.replace(/[^\d]/g, "") + "0".repeat(18)).slice(0, 18) || "0");
+  const wei = whole * 10n ** 18n + fraction;
+  return `0x${wei.toString(16)}`;
+}
+
+function shortenAddress(value) {
+  if (typeof value !== "string" || value.length < 12) {
+    return value || "";
+  }
+  return `${value.slice(0, 6)}...${value.slice(-4)}`;
+}
+
+function submittedPaymentsForTask(task, overrides = new Map()) {
+  const entries = Array.isArray(task?.paymentIntent?.perNodeAmounts) ? task.paymentIntent.perNodeAmounts : [];
+  return entries
+    .map((entry) => ({
+      peerId: entry.peerId,
+      txHash: overrides.get(entry.peerId) ?? entry.txHash ?? null
+    }))
+    .filter((entry) => entry.txHash);
 }
 
 function StatusIcon({ status }) {
-  if (["completed", "mock-dispatched"].includes(status)) {
+  if (["completed", "mock-dispatched", "verified"].includes(status)) {
     return <CheckCircle2 size={16} />;
   }
   if (["failed", "partial"].includes(status)) {
@@ -156,13 +183,14 @@ function StatusIcon({ status }) {
 }
 
 export default function Page() {
-  const [health, setHealth] = useState(null);
-  const [peers, setPeers] = useState([]);
   const [tasks, setTasks] = useState([]);
   const [selectedTaskId, setSelectedTaskId] = useState("");
   const [selectedTask, setSelectedTask] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [walletBusy, setWalletBusy] = useState(false);
+  const [walletAddress, setWalletAddress] = useState("");
+  const [walletChainId, setWalletChainId] = useState(null);
   const [taskForm, setTaskForm] = useState({
     url: "https://example.com",
     task: "Check local UX and produce a report.",
@@ -175,13 +203,7 @@ export default function Page() {
 
   const refresh = useCallback(async () => {
     setError("");
-    const [healthResult, peersResult, tasksResult] = await Promise.all([
-      api("/health"),
-      api("/gateway/peers"),
-      api("/gateway/tasks")
-    ]);
-    setHealth(healthResult);
-    setPeers(peersResult.nodes || []);
+    const tasksResult = await api("/gateway/tasks");
     setTasks(tasksResult.tasks || []);
     if (selectedTaskId) {
       const detail = await api(`/gateway/tasks/${selectedTaskId}`);
@@ -192,11 +214,97 @@ export default function Page() {
     }
   }, [selectedTaskId]);
 
+  const syncWalletState = useCallback(async () => {
+    if (typeof window === "undefined" || !window.ethereum?.request) {
+      setWalletAddress("");
+      setWalletChainId(null);
+      return;
+    }
+
+    const [accounts, chainIdHex] = await Promise.all([
+      window.ethereum.request({ method: "eth_accounts" }),
+      window.ethereum.request({ method: "eth_chainId" })
+    ]);
+    setWalletAddress(accounts?.[0] || "");
+    setWalletChainId(chainIdHex ? Number.parseInt(chainIdHex, 16) : null);
+  }, []);
+
   useEffect(() => {
     refresh().catch((err) => setError(err.message));
     const timer = setInterval(() => refresh().catch(() => {}), 6000);
     return () => clearInterval(timer);
   }, [refresh]);
+
+  useEffect(() => {
+    syncWalletState().catch(() => {});
+    if (typeof window === "undefined" || !window.ethereum?.on) {
+      return undefined;
+    }
+
+    const handleAccountsChanged = (accounts) => {
+      setWalletAddress(accounts?.[0] || "");
+    };
+    const handleChainChanged = (chainIdHex) => {
+      setWalletChainId(Number.parseInt(chainIdHex, 16));
+    };
+
+    window.ethereum.on("accountsChanged", handleAccountsChanged);
+    window.ethereum.on("chainChanged", handleChainChanged);
+
+    return () => {
+      window.ethereum?.removeListener?.("accountsChanged", handleAccountsChanged);
+      window.ethereum?.removeListener?.("chainChanged", handleChainChanged);
+    };
+  }, [syncWalletState]);
+
+  async function connectWallet() {
+    if (typeof window === "undefined" || !window.ethereum?.request) {
+      throw new Error("MetaMask-compatible wallet not detected in this browser.");
+    }
+
+    const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+    const chainIdHex = await window.ethereum.request({ method: "eth_chainId" });
+    setWalletAddress(accounts?.[0] || "");
+    setWalletChainId(chainIdHex ? Number.parseInt(chainIdHex, 16) : null);
+    return accounts?.[0] || "";
+  }
+
+  async function ensureZeroGChain() {
+    if (typeof window === "undefined" || !window.ethereum?.request) {
+      throw new Error("MetaMask-compatible wallet not detected in this browser.");
+    }
+
+    const currentChainIdHex = await window.ethereum.request({ method: "eth_chainId" });
+    if (Number.parseInt(currentChainIdHex, 16) === ZERO_G_CHAIN_ID) {
+      return;
+    }
+
+    try {
+      await window.ethereum.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: ZERO_G_CHAIN_HEX }]
+      });
+    } catch (error) {
+      if (error?.code !== 4902) {
+        throw new Error(`Please switch MetaMask to ${ZERO_G_CHAIN_NAME} before paying.`);
+      }
+
+      await window.ethereum.request({
+        method: "wallet_addEthereumChain",
+        params: [
+          {
+            chainId: ZERO_G_CHAIN_HEX,
+            chainName: ZERO_G_CHAIN_NAME,
+            nativeCurrency: { name: "0G", symbol: "0G", decimals: 18 },
+            rpcUrls: [ZERO_G_RPC_URL],
+            blockExplorerUrls: [ZERO_G_EXPLORER_URL]
+          }
+        ]
+      });
+    }
+
+    await syncWalletState();
+  }
 
   async function submitTask(event) {
     event.preventDefault();
@@ -211,7 +319,7 @@ export default function Page() {
         .split(/[\n,]/)
         .map((value) => value.trim())
         .filter(Boolean);
-      const result = await api("/gateway/tasks", {
+      const result = await api("/gateway/tasks/quote", {
         method: "POST",
         body: JSON.stringify({
           url: taskForm.url,
@@ -224,6 +332,8 @@ export default function Page() {
         })
       });
       setSelectedTaskId(result.taskId);
+      const detail = await api(`/gateway/tasks/${result.taskId}`);
+      setSelectedTask(detail.task);
       await refresh();
     } catch (err) {
       setError(err.message);
@@ -238,6 +348,69 @@ export default function Page() {
     setSelectedTask(detail.task);
   }
 
+  async function verifyPayment(task, overrides = new Map()) {
+    const paymentIntent = task?.paymentIntent;
+    const payments = submittedPaymentsForTask(task, overrides);
+
+    if (!task?.taskId || !paymentIntent?.id || !walletAddress || !payments.length) {
+      throw new Error("Missing task payment details needed for verification.");
+    }
+
+    const result = await api(`/gateway/tasks/${task.taskId}/payment/verify`, {
+      method: "POST",
+      body: JSON.stringify({
+        paymentIntentId: paymentIntent.id,
+        payerAddress: walletAddress,
+        payments
+      })
+    });
+    const detail = await api(`/gateway/tasks/${task.taskId}`);
+    setSelectedTask(detail.task);
+    await refresh();
+    return result;
+  }
+
+  async function payWithWallet(task) {
+    setWalletBusy(true);
+    setError("");
+    try {
+      const connectedWallet = walletAddress || (await connectWallet());
+      if (!connectedWallet) {
+        throw new Error("Connect a wallet before paying for this routed task.");
+      }
+
+      await ensureZeroGChain();
+      const pendingEntries = (task?.paymentIntent?.perNodeAmounts || []).filter((entry) => entry.status !== "verified");
+      if (!pendingEntries.length) {
+        await verifyPayment(task);
+        return;
+      }
+
+      const txHashesByPeerId = new Map();
+      for (const entry of pendingEntries) {
+        const txHash = await window.ethereum.request({
+          method: "eth_sendTransaction",
+          params: [
+            {
+              from: connectedWallet,
+              to: entry.walletAddress,
+              value: decimalToWeiHex(entry.minimumAmount)
+            }
+          ]
+        });
+        txHashesByPeerId.set(entry.peerId, txHash);
+      }
+
+      await verifyPayment(task, txHashesByPeerId);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setWalletBusy(false);
+    }
+  }
+
+  const wrongChain = walletAddress && walletChainId !== null && walletChainId !== ZERO_G_CHAIN_ID;
+
   return (
     <main>
       <header className="topbar">
@@ -246,8 +419,12 @@ export default function Page() {
           <h1>Node Nexus</h1>
         </div>
         <nav className="navActions">
+          <button className="walletBadge walletButton" onClick={() => connectWallet().catch((err) => setError(err.message))} type="button">
+            <Wallet size={14} />
+            {walletAddress ? shortenAddress(walletAddress) : "Connect Wallet"}
+          </button>
           <Link href="/peers">Live peers</Link>
-          <button className="iconButton" onClick={() => refresh()} title="Refresh">
+          <button className="iconButton" onClick={() => refresh()} title="Refresh" type="button">
             <RefreshCcw size={18} />
           </button>
         </nav>
@@ -255,23 +432,16 @@ export default function Page() {
 
       {error ? <div className="error">{error}</div> : null}
 
-      <section className="statusGrid">
-        <StatusTile icon={<Server />} label="Service" value={health?.service} />
-        <StatusTile icon={<RadioTower />} label="AXL" value={`${label(health?.axl?.mode)} / ${health?.axl?.running ? "running" : "stopped"}`} />
-        <StatusTile icon={<ShieldCheck />} label="0G" value={`${label(health?.zeroG?.uploadMode)} / ${health?.zeroG?.configured ? "configured" : "missing"}`} />
-        <StatusTile icon={<Database />} label="Qwen selector" value={health?.qwenSelection?.configured ? "configured" : "fallback auto"} />
-      </section>
-
-      <section className="workspace">
+      <section className="workspaceSingle">
         <form className="panel submitPanel" onSubmit={submitTask}>
           <div className="panelHeader">
             <div>
-              <h2>Dispatch Task</h2>
-              <p>Leave peer IDs blank to route from fresh AXL discovery.</p>
+              <h2>Get Quote</h2>
+              <p>Select paid nodes first, then complete ZeroG testnet payment before dispatch.</p>
             </div>
             <button disabled={busy} type="submit">
-              <Send size={16} />
-              Submit
+              <Coins size={16} />
+              {busy ? "Quoting..." : "Create Quote"}
             </button>
           </div>
           <label>
@@ -281,15 +451,6 @@ export default function Page() {
           <label>
             Task
             <textarea rows={4} value={taskForm.task} onChange={(event) => setTaskForm({ ...taskForm, task: event.target.value })} />
-          </label>
-          <label>
-            Optional explicit peer IDs
-            <textarea
-              rows={3}
-              placeholder="Blank = auto-select from live AXL peers"
-              value={taskForm.targetNodes}
-              onChange={(event) => setTaskForm({ ...taskForm, targetNodes: event.target.value })}
-            />
           </label>
           <div className="threeCol">
             <label>
@@ -308,34 +469,7 @@ export default function Page() {
               <input type="number" min="1" max="12" value={taskForm.maxTargets} onChange={(event) => setTaskForm({ ...taskForm, maxTargets: event.target.value })} />
             </label>
           </div>
-          <label>
-            Report type
-            <input value={taskForm.reportType} onChange={(event) => setTaskForm({ ...taskForm, reportType: event.target.value })} />
-          </label>
         </form>
-
-        <aside className="panel">
-          <div className="panelHeader">
-            <div>
-              <h2>Live Discovery</h2>
-              <p>Fresh profile probes only. No node registry is kept.</p>
-            </div>
-            <Globe2 size={18} />
-          </div>
-          <div className="nodeList">
-            {peers.slice(0, 8).map((node) => (
-              <button key={node.peerId} type="button" onClick={() => setTaskForm({ ...taskForm, targetNodes: node.peerId })}>
-                {node.profileStatus === "available" || node.profileStatus === "mock" ? <CheckCircle2 size={15} /> : <AlertCircle size={15} />}
-                <span>{node.displayName || node.nodeId || node.peerId.slice(0, 12)}</span>
-                <small>{node.location?.country || node.profileStatus}</small>
-              </button>
-            ))}
-            {!peers.length ? <p className="muted">No live peers found yet.</p> : null}
-          </div>
-          <Link className="textLink" href="/peers">
-            Inspect live peer scan
-          </Link>
-        </aside>
       </section>
 
       <section className="reports">
@@ -343,7 +477,7 @@ export default function Page() {
           <div className="panelHeader">
             <div>
               <h2>Tasks</h2>
-              <p>Recent gateway dispatches.</p>
+              <p>Recent routed tasks and payment states.</p>
             </div>
             <Activity size={18} />
           </div>
@@ -365,7 +499,7 @@ export default function Page() {
         <div className="panel detail">
           <div className="panelHeader">
             <div>
-              <h2>Reports</h2>
+              <h2>Task Detail</h2>
               <p>{selectedTask ? selectedTask.taskId : "Select a task"}</p>
             </div>
             <Route size={18} />
@@ -385,57 +519,122 @@ export default function Page() {
                   {selectedTask.request.selection.rationale}
                 </p>
               ) : null}
+
+              {selectedTask.paymentIntent ? (
+                <section className="paymentPanel">
+                  <div className="paymentHeader">
+                    <div>
+                      <h3>ZeroG Payment Gate</h3>
+                      <p>Dispatch stays blocked until this native 0G payment is verified.</p>
+                    </div>
+                    <span className={`paymentStatus ${selectedTask.paymentIntent.status || selectedTask.status}`}>
+                      {selectedTask.paymentIntent.status || selectedTask.status}
+                    </span>
+                  </div>
+
+                  <div className="paymentSummary">
+                    <div>
+                      <span>Total</span>
+                      <strong>{selectedTask.paymentIntent.totalAmount} 0G</strong>
+                    </div>
+                    <div>
+                      <span>Network</span>
+                      <strong>{selectedTask.paymentIntent.network}</strong>
+                    </div>
+                  </div>
+
+                  <div className="quoteRows">
+                    {(selectedTask.paymentIntent.perNodeAmounts || []).map((node) => (
+                      <div key={`${node.peerId}:${node.walletAddress}`} className="quoteRow">
+                        <strong>{node.nodeId || node.peerId}</strong>
+                        <span>{node.minimumAmount} 0G</span>
+                        <small>{shortenAddress(node.walletAddress)}</small>
+                        <small>{node.status || "payment_required"}</small>
+                        {node.txHash ? (
+                          <a
+                            className="textLink"
+                            href={`${ZERO_G_EXPLORER_URL.replace(/\/+$/, "")}/tx/${node.txHash}`}
+                            rel="noopener noreferrer"
+                            target="_blank"
+                          >
+                            {shortenAddress(node.txHash)}
+                          </a>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+
+                  {selectedTask.paymentIntent.verification?.details?.message ? (
+                    <div className="paymentMessage">
+                      {selectedTask.paymentIntent.verification.details.message}
+                    </div>
+                  ) : null}
+
+                  <div className="paymentActions">
+                    {!walletAddress ? (
+                      <button disabled={walletBusy} onClick={() => connectWallet().catch((err) => setError(err.message))} type="button">
+                        <Wallet size={16} />
+                        Connect Wallet
+                      </button>
+                    ) : null}
+                    {wrongChain ? <span className="warnText">Switch MetaMask to ZeroG testnet before paying.</span> : null}
+                    {selectedTask.status === "payment_required" ? (
+                      <>
+                        <button disabled={walletBusy || !walletAddress || wrongChain} onClick={() => payWithWallet(selectedTask)} type="button">
+                          <Coins size={16} />
+                          {walletBusy ? "Paying..." : "Pay Nodes with MetaMask"}
+                        </button>
+                        {submittedPaymentsForTask(selectedTask).length ? (
+                          <button
+                            className="secondaryButton"
+                            disabled={walletBusy || !walletAddress}
+                            onClick={() => verifyPayment(selectedTask).catch((err) => setError(err.message))}
+                            type="button"
+                          >
+                            Verify Submitted Tx
+                          </button>
+                        ) : null}
+                      </>
+                    ) : null}
+                    {selectedTask.status === "payment_verifying" ? (
+                      <span className="muted">Waiting for ZeroG testnet verification.</span>
+                    ) : null}
+                  </div>
+                </section>
+              ) : null}
+
               <div className="reportList">
-                {selectedTask.reports.map((report) => (
-                  <article key={report.id}>
-                    {(() => {
-                      const links = resolveReportLinks(report);
-                      return (
-                        <>
-                    <div className="reportHead">
-                      <StatusIcon status={report.status} />
-                      <strong>{report.nodeId || report.peerId || "node"}</strong>
-                      <span>{report.location?.country || ""}</span>
-                    </div>
-                    <p>{report.summary || report.error || "No summary yet."}</p>
-                    <div className="links">
+                {visibleReports(selectedTask.reports).map((report) => {
+                  const links = resolveReportLinks(report);
+                  return (
+                    <article key={report.id}>
+                      <div className="reportHead">
+                        <StatusIcon status={report.status} />
+                        <strong>{report.nodeId || report.peerId || "node"}</strong>
+                        <span>{report.location?.country || ""}</span>
+                      </div>
+                      <p>{report.summary || report.error || "No summary yet."}</p>
                       {links.zeroGDownloadUrl ? (
-                        <a href={links.zeroGDownloadUrl} target="_blank" rel="noopener noreferrer">
-                          Download from 0G
-                        </a>
+                        <div className="links">
+                          <a href={links.zeroGDownloadUrl} target="_blank" rel="noopener noreferrer">
+                            0G link
+                          </a>
+                          <a href={links.zeroGDownloadUrl} target="_blank" rel="noopener noreferrer" download="report.pdf">
+                            Download PDF
+                          </a>
+                        </div>
                       ) : null}
-                      {links.localDownloadUrl ? (
-                        <a href={links.localDownloadUrl} target="_blank" rel="noopener noreferrer">
-                          Download PDF
-                        </a>
-                      ) : null}
-                      {report.reportUri ? <span>{report.reportUri}</span> : null}
-                      {report.reportPath ? <span>{report.reportPath}</span> : null}
-                      {report.metadataPath ? <span>{report.metadataPath}</span> : null}
-                    </div>
-                        </>
-                      );
-                    })()}
-                  </article>
-                ))}
-                {!selectedTask.reports.length ? <p className="muted">Waiting for reports.</p> : null}
+                    </article>
+                  );
+                })}
+                {!selectedTask.reports.length ? <p className="muted">Waiting for reports after payment and dispatch.</p> : null}
               </div>
             </>
           ) : (
-            <p className="muted">Task results will appear here after dispatch.</p>
+            <p className="muted">Task quote, payment, and reports will appear here.</p>
           )}
         </div>
       </section>
     </main>
-  );
-}
-
-function StatusTile({ icon, label: tileLabel, value }) {
-  return (
-    <div className="statusTile">
-      {icon}
-      <span>{tileLabel}</span>
-      <strong>{label(value)}</strong>
-    </div>
   );
 }

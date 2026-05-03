@@ -15,5 +15,11 @@
     "axl-mesh"
   ],
   "networkType": "operator-local",
-  "operatorNotes": "Runs from local residential or operator-controlled network."
+  "operatorNotes": "Runs from local residential or operator-controlled network.",
+  "payment": {
+    "walletAddress": "0x000000000000000000000000000000000000dEaD",
+    "minimumAmount": "0.25",
+    "token": "0G",
+    "network": "zerog-testnet"
+  }
 }

@@ -48,7 +48,7 @@ cp config/node-profile.example.json config/node-profile.json
 npm run setup
 ```
 
-Edit `config/node-profile.json` with the real operator location. Do not hardcode fake country/city for production demos.
+Edit `config/node-profile.json` with the real operator location and the operator payment fields. Do not hardcode fake country/city for production demos.
 
 `npm run setup` does the full local dependency setup:
 
@@ -105,7 +105,9 @@ npm start
 Hosted gateway API plus frontend:
 
 ```bash
-NODE_NEXUS_ROLE=gateway AXL_MODE=real npm start
+NODE_NEXUS_ROLE=gateway \
+AXL_MODE=real \
+npm start
 NEXT_PUBLIC_NODE_NEXUS_API_URL=http://localhost:8080 npm run web:dev
 ```
 
@@ -131,10 +133,10 @@ AXL status:
 curl http://localhost:8080/axl/status
 ```
 
-Gateway tasks:
+Gateway quote:
 
 ```bash
-curl -X POST http://localhost:8080/gateway/tasks \
+curl -X POST http://localhost:8080/gateway/tasks/quote \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://example.com",
@@ -146,13 +148,28 @@ curl -X POST http://localhost:8080/gateway/tasks \
   }'
 ```
 
+Verify ZeroG payment:
+
+```bash
+curl -X POST http://localhost:8080/gateway/tasks/<taskId>/payment/verify \
+  -H "Content-Type: application/json" \
+  -d '{
+    "paymentIntentId": "<payment-intent-id>",
+    "payerAddress": "0x...",
+    "payments": [
+      { "peerId": "peer-id-1", "txHash": "0x..." },
+      { "peerId": "peer-id-2", "txHash": "0x..." }
+    ]
+  }'
+```
+
 Fresh AXL peer discovery:
 
 ```bash
 curl http://localhost:8080/gateway/peers
 ```
 
-The gateway does not keep a centralized node registry. `/gateway/peers` probes current AXL topology and calls `node_nexus.profile` on peers at request time. `/gateway/tasks` can auto-select from that fresh scan when `targetNodes` is omitted. Use `selectionMode: "ai"` to let Qwen select peers through the 0G router; if Qwen credentials are unavailable, the gateway falls back to deterministic live selection.
+The gateway does not keep a centralized node registry. `/gateway/peers` probes current AXL topology and calls `node_nexus.profile` on peers at request time. `/gateway/tasks/quote` auto-selects fresh live peers when `targetNodes` is omitted, excludes operators without valid payment config, returns direct-to-node ZeroG payment requirements, and blocks dispatch until every selected node payment verifies successfully. Use `selectionMode: "ai"` to let Qwen select peers through the 0G router; if Qwen credentials are unavailable, the gateway falls back to deterministic live selection.
 
 Run a local WebOps task:
 
@@ -224,7 +241,7 @@ artifacts/
 1. Start Node A:
    `AXL_MODE=mock ZERO_G_UPLOAD_MODE=disabled PORT=8080 npm start`
 2. Start Node B from another checkout or terminal with a different port/profile.
-3. Open the web console or call `/gateway/tasks` with no `targetNodes` to auto-select live peers.
+3. Open the web console or call `/gateway/tasks/quote` with no `targetNodes` to auto-select live peers, then pay the returned ZeroG quote before dispatch.
 4. Inspect `artifacts/<taskId>/report.pdf` and `metadata.json`.
 5. Enable `ZERO_G_UPLOAD_MODE=real` with credentials to collect real `0g://...` report URIs.
 

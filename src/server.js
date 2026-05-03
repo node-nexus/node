@@ -9,8 +9,16 @@ import { applyArtifactRetention } from "./artifacts.js";
 import { axlClientConfig, callAxlMcp, getAxlTopology } from "./axlClient.js";
 import { GatewayStore } from "./gatewayStore.js";
 import { logEvent, logStep, truncate } from "./logging.js";
-import { nodeLocation } from "./nodeProfile.js";
+import { nodeLocation, paymentEligibility } from "./nodeProfile.js";
 import { runPythonAgent } from "./pythonAgent.js";
+import {
+  createZeroGPaymentProvider,
+  formatZeroGAmount,
+  resolveZeroGPaymentConfig,
+  sumZeroGAmounts,
+  validateZeroGPaymentConfig,
+  verifyZeroGPayment
+} from "./zeroGPayments.js";
 import {
   uploadReportToZeroGStorage,
   validateZeroGStorageConfig
@@ -136,7 +144,11 @@ function deterministicPeerSelection({ candidates, targetLocations, maxTargets })
 export function createApp({
   nodeProfile = DEFAULT_PROFILE,
   axlStatusProvider = () => null,
-  gatewayStore = new GatewayStore()
+  gatewayStore = new GatewayStore(),
+  paymentConfig = resolveZeroGPaymentConfig(),
+  paymentProviderFactory = createZeroGPaymentProvider,
+  paymentVerifier = verifyZeroGPayment,
+  peerDiscoveryOverride = null
 } = {}) {
   const app = express();
 
@@ -157,6 +169,89 @@ export function createApp({
       return `/${String(relativePath).replace(/^\/+/, "")}`;
     }
     return `${request.protocol}://${host}/${String(relativePath).replace(/^\/+/, "")}`;
+  }
+
+  function paymentIntentSnapshot(task) {
+    return task?.paymentIntent ?? null;
+  }
+
+  function buildSelectedNodeQuote(node) {
+    const payment = paymentEligibility(node.profile);
+    if (!payment.eligible) {
+      return null;
+    }
+
+    return {
+      peerId: node.peerId,
+      nodeId: node.nodeId,
+      displayName: node.displayName,
+      location: node.location,
+      payment: payment.payment
+    };
+  }
+
+  function buildPaymentIntent({ taskId, payerAddress = null, selectedNodes }) {
+    const perNodeAmounts = selectedNodes.map((node) => ({
+      peerId: node.peerId,
+      nodeId: node.nodeId,
+      walletAddress: node.payment.walletAddress,
+      minimumAmount: node.payment.minimumAmount,
+      token: node.payment.token,
+      network: node.payment.network,
+      txHash: null,
+      status: "payment_required",
+      verifiedAt: null
+    }));
+    const totalAmount = formatZeroGAmount(sumZeroGAmounts(perNodeAmounts.map((node) => node.minimumAmount)));
+
+    return {
+      id: crypto.randomUUID(),
+      payerAddress,
+      network: paymentConfig.network,
+      token: paymentConfig.token,
+      selectedNodes: selectedNodes.map((node) => ({
+        peerId: node.peerId,
+        nodeId: node.nodeId,
+        displayName: node.displayName,
+        location: node.location
+      })),
+      perNodeAmounts,
+      totalAmount,
+      status: "payment_required",
+      verifiedAt: null,
+      verification: {
+        status: "pending",
+        details: null
+      }
+    };
+  }
+
+  async function queueAndDispatchTask(taskId) {
+    const task = gatewayStore.getTask(taskId);
+    if (!task) {
+      return false;
+    }
+
+    const paymentIntent = paymentIntentSnapshot(task);
+    if (!paymentIntent || paymentIntent.status !== "verified") {
+      return false;
+    }
+
+    gatewayStore.setTaskStatus(taskId, "queued");
+    if (!gatewayStore.claimTaskForDispatch(taskId)) {
+      return false;
+    }
+
+    void dispatchGatewayTask({
+      taskId,
+      url: task.url,
+      task: task.task,
+      reportType: task.reportType,
+      targetNodes: task.targetNodes,
+      targetLocations: task.targetLocations
+    });
+
+    return true;
   }
 
   app.use((request, response, next) => {
@@ -498,6 +593,10 @@ export function createApp({
   }
 
   async function discoverLivePeers({ includeProfiles = true } = {}) {
+    if (typeof peerDiscoveryOverride === "function") {
+      return peerDiscoveryOverride({ includeProfiles });
+    }
+
     const axl = axlStatusProvider() ?? { mode: "disabled" };
 
     if (axl.mode === "disabled") {
@@ -518,6 +617,21 @@ export function createApp({
           displayName: "Mock Node Nexus IN",
           location: { country: "IN", region: "Maharashtra", city: "Mumbai", timezone: "Asia/Kolkata" },
           capabilities: ["browser-use", "qwen-agent", "screenshots", "pdf-report", "0g-storage-upload"],
+          profile: {
+            nodeId: "mock-node-nexus-in",
+            displayName: "Mock Node Nexus IN",
+            country: "IN",
+            region: "Maharashtra",
+            city: "Mumbai",
+            timezone: "Asia/Kolkata",
+            capabilities: ["browser-use", "qwen-agent", "screenshots", "pdf-report", "0g-storage-upload"],
+            payment: {
+              walletAddress: "0x0000000000000000000000000000000000001001",
+              minimumAmount: "0.25",
+              token: paymentConfig.token,
+              network: paymentConfig.network
+            }
+          },
           profileStatus: "mock"
         },
         {
@@ -526,6 +640,21 @@ export function createApp({
           displayName: "Mock Node Nexus US",
           location: { country: "US", region: "NY", city: "New York", timezone: "America/New_York" },
           capabilities: ["browser-use", "qwen-agent", "screenshots", "pdf-report", "0g-storage-upload"],
+          profile: {
+            nodeId: "mock-node-nexus-us",
+            displayName: "Mock Node Nexus US",
+            country: "US",
+            region: "NY",
+            city: "New York",
+            timezone: "America/New_York",
+            capabilities: ["browser-use", "qwen-agent", "screenshots", "pdf-report", "0g-storage-upload"],
+            payment: {
+              walletAddress: "0x0000000000000000000000000000000000001002",
+              minimumAmount: "0.40",
+              token: paymentConfig.token,
+              network: paymentConfig.network
+            }
+          },
           profileStatus: "mock"
         }
       ];
@@ -584,24 +713,38 @@ export function createApp({
   }
 
   async function selectGatewayTargets({ url, task, targetNodes, targetLocations, selectionMode, maxTargets }) {
-    if (targetNodes.length) {
-      return {
-        targetNodes,
-        discovery: null,
-        selection: { mode: "manual", selectedPeerIds: targetNodes, rationale: "Requester supplied explicit peer IDs." }
-      };
-    }
-
     const discovery = await discoverLivePeers({ includeProfiles: true });
     if (!discovery.ok) {
       throw new Error(discovery.error || "Live peer discovery failed.");
     }
 
     const available = discovery.nodes.filter((node) => node.profileStatus === "available" || node.profileStatus === "mock");
+    const paidEligible = available.filter((node) => paymentEligibility(node.profile).eligible);
     const selectedCount = Math.max(1, Math.min(Number(maxTargets || 1), available.length || 1));
 
     if (!available.length) {
       throw new Error("No available Node Nexus peers responded to live discovery.");
+    }
+
+    if (!paidEligible.length) {
+      throw new Error("No discovered Node Nexus peers have valid ZeroG payment config for routed paid tasks.");
+    }
+
+    if (targetNodes.length) {
+      const selected = targetNodes
+        .map((peerId) => paidEligible.find((node) => node.peerId === peerId))
+        .filter(Boolean);
+
+      if (selected.length !== targetNodes.length) {
+        throw new Error("One or more requested targetNodes are unavailable or missing valid ZeroG payment config.");
+      }
+
+      return {
+        targetNodes: selected.map((node) => node.peerId),
+        selectedNodes: selected.map(buildSelectedNodeQuote),
+        discovery,
+        selection: { mode: "manual", selectedPeerIds: selected.map((node) => node.peerId), rationale: "Requester supplied explicit peer IDs." }
+      };
     }
 
     if (selectionMode === "ai") {
@@ -610,21 +753,26 @@ export function createApp({
           url,
           task,
           targetLocations,
-          candidates: available,
+          candidates: paidEligible,
           maxTargets: selectedCount
         });
 
         if (qwenSelection.selectedPeerIds.length) {
+          const selected = qwenSelection.selectedPeerIds
+            .map((peerId) => paidEligible.find((node) => node.peerId === peerId))
+            .filter(Boolean);
           return {
-            targetNodes: qwenSelection.selectedPeerIds,
+            targetNodes: selected.map((node) => node.peerId),
+            selectedNodes: selected.map(buildSelectedNodeQuote),
             discovery,
             selection: { mode: "ai", ...qwenSelection }
           };
         }
       } catch (error) {
-        const selected = deterministicPeerSelection({ candidates: available, targetLocations, maxTargets: selectedCount });
+        const selected = deterministicPeerSelection({ candidates: paidEligible, targetLocations, maxTargets: selectedCount });
         return {
           targetNodes: selected.map((node) => node.peerId),
+          selectedNodes: selected.map(buildSelectedNodeQuote),
           discovery,
           selection: {
             mode: "auto-fallback",
@@ -635,9 +783,10 @@ export function createApp({
       }
     }
 
-    const selected = deterministicPeerSelection({ candidates: available, targetLocations, maxTargets: selectedCount });
+    const selected = deterministicPeerSelection({ candidates: paidEligible, targetLocations, maxTargets: selectedCount });
     return {
       targetNodes: selected.map((node) => node.peerId),
+      selectedNodes: selected.map(buildSelectedNodeQuote),
       discovery,
       selection: {
         mode: "auto",
@@ -649,7 +798,7 @@ export function createApp({
     };
   }
 
-  async function createGatewayTask(request, response) {
+  async function createGatewayQuote(request, response) {
     const taskId = sanitizeTaskId(request.body?.taskId) || crypto.randomUUID();
     const { url, task, reportType = "webops-local-ux", selectionMode = "auto" } = request.body ?? {};
     const targetNodes = Array.isArray(request.body?.targetNodes) ? request.body.targetNodes.filter(Boolean) : [];
@@ -686,6 +835,19 @@ export function createApp({
       return;
     }
 
+    if (!selected.selectedNodes?.length) {
+      response.status(502).json({
+        ok: false,
+        error: "No payment-eligible nodes were selected for this routed task."
+      });
+      return;
+    }
+
+    const paymentIntent = buildPaymentIntent({
+      taskId,
+      selectedNodes: selected.selectedNodes
+    });
+
     try {
       gatewayStore.createTask({
         taskId,
@@ -694,9 +856,12 @@ export function createApp({
         reportType,
         targetNodes: selected.targetNodes,
         targetLocations,
+        status: "payment_required",
+        paymentIntent,
         request: {
           ...(request.body ?? {}),
           targetNodes: selected.targetNodes,
+          selectedNodes: selected.selectedNodes,
           discoveryStored: false,
           selection: selected.selection
         }
@@ -709,24 +874,263 @@ export function createApp({
       return;
     }
 
-    void dispatchGatewayTask({ taskId, url, task, reportType, targetNodes: selected.targetNodes, targetLocations });
-
     response.status(axl.mode === "disabled" ? 503 : 202).json({
       ok: axl.mode !== "disabled",
       mode: axl.mode,
       taskId,
+      selectedNodes: selected.selectedNodes,
       targetNodes: selected.targetNodes,
       selection: selected.selection,
-      status: axl.mode === "disabled" ? "failed" : "queued",
+      paymentIntent,
+      totalAmount: paymentIntent.totalAmount,
+      status: axl.mode === "disabled" ? "failed" : "payment_required",
       error:
         axl.mode === "disabled"
-          ? "AXL is disabled; dispatch requires AXL_MODE=real or AXL_MODE=mock."
+          ? "AXL is disabled; quote creation requires AXL_MODE=real or AXL_MODE=mock."
           : undefined
+      });
+  }
+
+  async function verifyGatewayTaskPayment(request, response) {
+    const task = gatewayStore.getTask(request.params.taskId);
+    if (!task) {
+      response.status(404).json({ ok: false, error: "Gateway task not found." });
+      return;
+    }
+
+    const paymentIntent = paymentIntentSnapshot(task);
+    if (!paymentIntent) {
+      response.status(400).json({ ok: false, error: "Task has no payment intent." });
+      return;
+    }
+
+    const { paymentIntentId, payerAddress, payments } = request.body ?? {};
+    if (paymentIntentId !== paymentIntent.id) {
+      response.status(400).json({ ok: false, error: "paymentIntentId does not match this task." });
+      return;
+    }
+
+    if (typeof payerAddress !== "string" || !Array.isArray(payments) || payments.length === 0) {
+      response.status(400).json({ ok: false, error: "Expected paymentIntentId, payerAddress, and payments[]." });
+      return;
+    }
+
+    const submittedPayments = new Map();
+    for (const payment of payments) {
+      const peerId = typeof payment?.peerId === "string" ? payment.peerId : "";
+      const txHash = typeof payment?.txHash === "string" ? payment.txHash : "";
+      if (!peerId || !txHash) {
+        response.status(400).json({ ok: false, error: "Each payment entry must include peerId and txHash." });
+        return;
+      }
+      submittedPayments.set(peerId, txHash);
+    }
+
+    if (paymentIntent.status === "verified" && paymentIntent.payerAddress?.toLowerCase() === payerAddress.toLowerCase()) {
+      response.json({
+        ok: true,
+        taskId: task.taskId,
+        status: task.status,
+        paymentIntent,
+        verification: paymentIntent.verification?.details ?? null
+      });
+      return;
+    }
+
+    const currentPerNodeAmounts = Array.isArray(paymentIntent.perNodeAmounts) ? paymentIntent.perNodeAmounts : [];
+    const currentByPeerId = new Map(currentPerNodeAmounts.map((entry) => [entry.peerId, entry]));
+
+    for (const [peerId, txHash] of submittedPayments.entries()) {
+      if (!currentByPeerId.has(peerId)) {
+        response.status(400).json({ ok: false, error: `Payment submission included unknown peerId ${peerId}.` });
+        return;
+      }
+      const existingConsumption = gatewayStore.getConsumedPaymentTx(txHash);
+      if (
+        existingConsumption &&
+        (existingConsumption.task_id !== task.taskId || existingConsumption.payment_intent_id !== paymentIntent.id)
+      ) {
+        response.status(409).json({
+          ok: false,
+          error: `This txHash was already consumed by another task payment intent: ${txHash}`
+        });
+        return;
+      }
+    }
+
+    const verifyingIntent = {
+      ...paymentIntent,
+      payerAddress,
+      status: "payment_verifying",
+      perNodeAmounts: currentPerNodeAmounts.map((entry) => ({
+        ...entry,
+        txHash: submittedPayments.get(entry.peerId) ?? entry.txHash ?? null,
+        status: submittedPayments.get(entry.peerId)
+          ? "payment_verifying"
+          : entry.status ?? "payment_required"
+      })),
+      verification: {
+        status: "verifying",
+        details: null
+      }
+    };
+    gatewayStore.updateTask({
+      taskId: task.taskId,
+      status: "payment_verifying",
+      paymentIntent: verifyingIntent
+    });
+
+    const provider = paymentProviderFactory(paymentConfig);
+    const perNodeVerification = [];
+
+    for (const entry of verifyingIntent.perNodeAmounts) {
+      const txHash = entry.txHash;
+      if (!txHash) {
+        perNodeVerification.push({
+          peerId: entry.peerId,
+          txHash: null,
+          ok: false,
+          code: "missing_tx",
+          message: "Missing txHash for selected node payment.",
+          details: null
+        });
+        continue;
+      }
+
+      try {
+        const verification = await paymentVerifier({
+          provider,
+          txHash,
+          payerAddress,
+          receiverAddress: entry.walletAddress,
+          requiredAmount: entry.minimumAmount,
+          expectedChainId: paymentConfig.chainId,
+          minConfirmations: paymentConfig.minConfirmations
+        });
+        perNodeVerification.push({
+          peerId: entry.peerId,
+          txHash,
+          ...verification
+        });
+      } catch (error) {
+        perNodeVerification.push({
+          peerId: entry.peerId,
+          txHash,
+          ok: false,
+          code: "verification_error",
+          message: error instanceof Error ? error.message : String(error),
+          details: null
+        });
+      }
+    }
+
+    const allVerified = perNodeVerification.every((item) => item.ok);
+
+    if (!allVerified) {
+      const failedIntent = {
+        ...verifyingIntent,
+        status: "payment_required",
+        perNodeAmounts: verifyingIntent.perNodeAmounts.map((entry) => {
+          const verification = perNodeVerification.find((item) => item.peerId === entry.peerId);
+          return {
+            ...entry,
+            status: verification?.ok ? "verified" : "payment_required",
+            verifiedAt: verification?.ok ? new Date().toISOString() : entry.verifiedAt ?? null
+          };
+        }),
+        verification: {
+          status: "failed",
+          details: {
+            code: "per_node_verification_failed",
+            message: "One or more direct node payments did not verify.",
+            snapshot: perNodeVerification
+          }
+        }
+      };
+      for (const verification of perNodeVerification.filter((item) => item.ok)) {
+        const consumed = gatewayStore.getConsumedPaymentTx(verification.txHash);
+        if (!consumed) {
+          gatewayStore.consumePaymentTx({
+            txHash: verification.txHash,
+            taskId: task.taskId,
+            paymentIntentId: paymentIntent.id
+          });
+        }
+      }
+      gatewayStore.updateTask({
+        taskId: task.taskId,
+        status: "payment_required",
+        paymentIntent: failedIntent
+      });
+      response.status(400).json({
+        ok: false,
+        taskId: task.taskId,
+        status: "payment_required",
+        paymentIntent: failedIntent,
+        verification: {
+          ok: false,
+          code: "per_node_verification_failed",
+          message: "One or more direct node payments did not verify.",
+          details: perNodeVerification
+        }
+      });
+      return;
+    }
+
+    for (const verification of perNodeVerification) {
+      const existingConsumption = gatewayStore.getConsumedPaymentTx(verification.txHash);
+      if (existingConsumption) {
+        continue;
+      }
+      gatewayStore.consumePaymentTx({
+        txHash: verification.txHash,
+        taskId: task.taskId,
+        paymentIntentId: paymentIntent.id
+      });
+    }
+
+    const verifiedIntent = {
+      ...verifyingIntent,
+      status: "verified",
+      verifiedAt: new Date().toISOString(),
+      perNodeAmounts: verifyingIntent.perNodeAmounts.map((entry) => ({
+        ...entry,
+        status: "verified",
+        verifiedAt: new Date().toISOString()
+      })),
+      verification: {
+        status: "verified",
+        details: {
+          code: "verified",
+          message: "All selected node payments verified on ZeroG testnet.",
+          snapshot: perNodeVerification
+        }
+      }
+    };
+    gatewayStore.updateTask({
+      taskId: task.taskId,
+      status: "queued",
+      paymentIntent: verifiedIntent
+    });
+    await queueAndDispatchTask(task.taskId);
+
+    response.json({
+      ok: true,
+      taskId: task.taskId,
+      status: gatewayStore.getTask(task.taskId)?.status ?? "queued",
+      paymentIntent: gatewayStore.getTask(task.taskId)?.paymentIntent ?? verifiedIntent,
+      verification: {
+        ok: true,
+        code: "verified",
+        message: "All selected node payments verified on ZeroG testnet.",
+        details: perNodeVerification
+      }
     });
   }
 
   app.get("/health", (request, response) => {
     const zeroGValidation = validateZeroGStorageConfig();
+    const zeroGPaymentValidation = validateZeroGPaymentConfig(paymentConfig);
     logStep(request.requestId, "health", "success");
     response.json({
       ok: true,
@@ -741,6 +1145,14 @@ export function createApp({
         uploadMode: zeroGValidation.config.uploadMode,
         configured: zeroGValidation.ok,
         missing: zeroGValidation.missing
+      },
+      zeroGPayments: {
+        configured: zeroGPaymentValidation.ok,
+        missing: zeroGPaymentValidation.missing,
+        invalid: zeroGPaymentValidation.invalid,
+        network: paymentConfig.network,
+        token: paymentConfig.token,
+        rpcUrl: paymentConfig.rpcUrl
       },
       qwenSelection: {
         configured: qwenSelectionConfigured()
@@ -797,7 +1209,7 @@ export function createApp({
     }
   });
 
-  app.post("/axl/dispatch", createGatewayTask);
+  app.post("/axl/dispatch", createGatewayQuote);
   app.get("/axl/tasks/:taskId", (request, response) => {
     const task = gatewayStore.getTask(request.params.taskId);
     if (!task) {
@@ -815,7 +1227,8 @@ export function createApp({
     response.json({ ok: true, taskId: request.params.taskId, reports: gatewayStore.listReports(request.params.taskId) });
   });
 
-  app.post("/gateway/tasks", createGatewayTask);
+  app.post("/gateway/tasks/quote", createGatewayQuote);
+  app.post("/gateway/tasks", createGatewayQuote);
   app.get("/gateway/tasks", (request, response) => {
     response.json({
       ok: true,
@@ -838,6 +1251,7 @@ export function createApp({
     }
     response.json({ ok: true, taskId: request.params.taskId, reports: gatewayStore.listReports(request.params.taskId) });
   });
+  app.post("/gateway/tasks/:taskId/payment/verify", verifyGatewayTaskPayment);
   app.post("/gateway/nodes", (request, response) => {
     response.status(410).json({
       ok: false,

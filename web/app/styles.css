@@ -45,6 +45,7 @@ main {
 }
 
 h1,
+h3,
 h2,
 p {
   margin: 0;
@@ -106,6 +107,21 @@ button:disabled {
   text-decoration: none;
 }
 
+.walletBadge {
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  display: inline-flex;
+  gap: 7px;
+  min-height: 38px;
+  padding: 0 12px;
+}
+
+.walletButton {
+  cursor: pointer;
+}
+
 .error {
   background: #fff4f2;
   border: 1px solid #f2b8b2;
@@ -114,30 +130,6 @@ button:disabled {
   padding: 12px 14px;
 }
 
-.statusGrid {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin-bottom: 16px;
-}
-
-.statusTile {
-  align-items: center;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  display: grid;
-  gap: 4px;
-  grid-template-columns: 22px 1fr;
-  min-height: 88px;
-  padding: 14px;
-}
-
-.statusTile svg {
-  color: var(--accent);
-  grid-row: span 2;
-}
-
-.statusTile span,
 .panel p,
 .muted,
 small {
@@ -145,17 +137,23 @@ small {
   font-size: 13px;
 }
 
-.statusTile strong {
-  font-size: 14px;
-  overflow-wrap: anywhere;
+.workspaceSingle {
+  margin-bottom: 16px;
 }
 
 .workspace,
 .reports {
   display: grid;
   gap: 16px;
-  grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.75fr);
   margin-bottom: 16px;
+}
+
+.workspace {
+  grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.75fr);
+}
+
+.workspaceSingle .submitPanel {
+  width: 100%;
 }
 
 .reports {
@@ -174,6 +172,14 @@ small {
   gap: 16px;
   justify-content: space-between;
   margin-bottom: 16px;
+}
+
+.statusTile span,
+.panel p,
+.muted,
+small {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 label {
@@ -308,6 +314,99 @@ article {
   gap: 8px;
   margin-bottom: 12px;
   padding: 9px 10px;
+}
+
+.paymentPanel {
+  border: 1px solid var(--line);
+  display: grid;
+  gap: 14px;
+  margin-bottom: 16px;
+  padding: 14px;
+}
+
+.paymentHeader {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.paymentHeader h3 {
+  font-size: 16px;
+  margin-bottom: 4px;
+}
+
+.paymentStatus {
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.paymentStatus.verified,
+.paymentStatus.completed,
+.paymentStatus.dispatching {
+  background: #edf7f5;
+  color: var(--accent-dark);
+}
+
+.paymentStatus.payment_required,
+.paymentStatus.payment_verifying,
+.paymentStatus.queued {
+  background: #fff9ec;
+  color: #8a6116;
+}
+
+.paymentSummary {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.paymentSummary div,
+.quoteRow {
+  background: #fbfcf9;
+  border: 1px solid var(--line);
+  display: grid;
+  gap: 4px;
+  padding: 10px 11px;
+}
+
+.quoteRow a {
+  font-size: 12px;
+}
+
+.paymentSummary span,
+.quoteRow small,
+.quoteRow span,
+.warnText {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.quoteRows {
+  display: grid;
+  gap: 8px;
+}
+
+.paymentMessage {
+  background: #fff4f2;
+  border: 1px solid #f2b8b2;
+  color: var(--warn);
+  font-size: 13px;
+  padding: 10px 11px;
+}
+
+.paymentActions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.secondaryButton {
+  background: #edf7f5;
+  color: var(--accent-dark);
 }
 
 .peerSummary {
