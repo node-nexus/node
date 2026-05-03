@@ -1,45 +1,82 @@
 # Node Nexus
 
-Node Nexus: decentralized local WebOps reports from real user-run nodes.
+Node Nexus is a decentralized local WebOps network built around real user operated nodes.
 
-Each operator runs a node from their real location. A requester can dispatch a browser task to one or more geographically distributed nodes over Gensyn AXL. Each node executes the task locally with browser-use and Qwen through the 0G router, generates a human-style PDF report with screenshots and local UX observations, uploads report artifacts to 0G Storage when enabled, and returns report details over the mesh.
+It exists because current WebOps is broken in two ways: it either depends on centralized data centers that do not reflect real-world usage, or it depends on manual local testing that is too slow and too expensive to scale. Teams miss what users actually see across regions, including pricing, consent banners, redirects, search results, blocked content, and login friction.
 
-## Architecture
+Node Nexus fixes this by letting real operators run tasks from their own environments, return evidence rich reports, and get paid for contributing useful geographic coverage.
 
-```text
-Requester
-  -> local Node Nexus API
-  -> Gensyn AXL mesh
-  -> remote Node Nexus operators
-  -> /mcp/execute on each local node
-  -> browser-use + Qwen
-  -> PDF report + screenshots
-  -> 0G Storage
-  -> report URI + summary over AXL
-```
+## Why This Needs AXL and 0G
 
-## Why It Exists
+This product only works properly because of the combination of Gensyn AXL and 0G.
 
-Global web behavior is local. Consent banners, language, search results, CDN routing, blocked content, pricing, currency, redirects, and login walls can all differ by operator location. Node Nexus turns real user-run nodes into a decentralized local WebOps testing network.
+### Why AXL is needed
 
-## How It Works
+Node Nexus is a network of independent operator nodes. Those nodes need to discover each other, exchange metadata, receive remote tasks, and return reports across separate machines. That requires inter node communication.
 
-- **AXL mesh:** real inter-node communication uses Gensyn AXL. Node Nexus does not replace it with centralized discovery.
-- **Local execution:** each node runs browser-use with Qwen via the 0G OpenAI-compatible router.
-- **Reports:** the Python agent captures evidence screenshots and renders `report.pdf`.
-- **0G Storage:** real mode uploads PDF and metadata to 0G Storage; disabled mode keeps local artifacts only.
+AXL provides the communication layer for this. It is what makes it possible for Node Nexus to operate as a decentralized node network.
 
-## Modes
+### Why 0G is needed
 
-- `AXL_MODE=disabled`: local HTTP API only.
-- `AXL_MODE=mock`: starts the local setup shim and labels all mesh behavior as mock.
-- `AXL_MODE=real`: starts a real AXL binary and fails clearly if missing.
-- `NODE_NEXUS_ROLE=gateway`: exposes hosted gateway APIs for non-node users.
-- `NODE_NEXUS_ROLE=operator`: runs as a remote report-producing operator node.
-- `ZERO_G_UPLOAD_MODE=disabled`: returns local report paths, no fake hash.
-- `ZERO_G_UPLOAD_MODE=real`: uploads report and metadata using 0G Storage credentials.
+Node Nexus also needs an economic layer, an AI layer, and a durable artifact layer.
+
+0G provides all three:
+
+- payments for operator nodes
+- AI inference through the 0G router
+- report and metadata persistence through 0G Storage
+
+Without 0G, operators could still run browser tasks, but there would be no integrated decentralized way to pay nodes, power inference, and persist outputs.
+
+## Project Info
+
+Node Nexus is designed as a decentralized operator network for local web testing and evidence collection.
+
+Each node can:
+
+- receive browser based WebOps tasks
+- execute them locally
+- capture screenshots and structured observations
+- generate a PDF report
+- return report results to the network
+
+The system combines:
+
+- a Node.js and Express service for orchestration and node APIs
+- a Python execution agent for browser automation and report generation
+- a Next.js frontend for task submission and report access
+- operator metadata including location, capabilities, and payment details
+
+## 0G Integration
+
+Node Nexus uses 0G in three ways.
+
+### Payments
+
+Operator nodes publish a 0G payment address and minimum task price in their node profile. Selected node payments are verified onchain before work is dispatched.
+
+### AI Inference
+
+The browser execution stack uses Qwen through the 0G OpenAI compatible router for task reasoning, report support, and optional peer-selection logic.
+
+### Storage
+
+Generated report artifacts are uploaded to 0G Storage. Node Nexus stores the PDF report and metadata on 0G and returns `0g://` URIs plus download links.
+
+## AXL Integration
+
+Node Nexus uses Gensyn AXL for inter node communication.
+
+AXL is used to:
+
+- discover live peers
+- exchange node profile information
+- send remote execution tasks between nodes
+- return asynchronous reports over the mesh
 
 ## Setup
+
+Install dependencies and create local config:
 
 ```bash
 npm install
@@ -48,39 +85,35 @@ cp config/node-profile.example.json config/node-profile.json
 npm run setup
 ```
 
-Edit `config/node-profile.json` with the real operator location and the operator payment fields. Do not hardcode fake country/city for production demos.
+Then edit:
 
-`npm run setup` does the full local dependency setup:
+- `.env`
+- `config/node-profile.json`
 
-- Detects an existing real AXL binary at `AXL_BINARY_PATH` or `bin/axl-core/node`.
-- If missing, clones `https://github.com/gensyn-ai/axl` into ignored `vendor/axl/` and builds the official Go node with the upstream-pinned `GOTOOLCHAIN=go1.25.5`.
-- Generates `bin/axl-core/private.pem` and `bin/axl-core/node-config.json`.
-- Falls back to the mock shim only if the build fails and `REQUIRE_REAL_AXL=true` is not set.
-- Creates/reuses `python-agent/venv`, installs browser-use/Qwen/report dependencies, and installs Playwright Chromium.
+Your node profile should include:
 
-If you change `AXL_MCP_FORWARD_URL`, `AXL_PEERS`, or `AXL_LISTEN`, rerun `npm run setup` so `bin/axl-core/node-config.json` matches the node you intend to start.
+- node ID
+- display name
+- real location
+- supported capabilities
+- 0G payment wallet address
+- minimum task amount
 
-Check 0G inference credentials:
+Your `.env` should include real values for:
+
+- `AXL_IDENTITY`
+- `ZEROG_API_KEY`
+- `ZERO_G_PRIVATE_KEY`
+- `ZERO_G_STORAGE_RPC_URL`
+- `ZERO_G_STORAGE_INDEXER_URL`
+
+Optional check:
 
 ```bash
 npm run check:0g
 ```
 
-## Running
-
-Local node with no mesh and no storage upload:
-
-```bash
-AXL_MODE=disabled ZERO_G_UPLOAD_MODE=disabled npm start
-```
-
-Mock AXL:
-
-```bash
-AXL_MODE=mock ZERO_G_UPLOAD_MODE=disabled npm start
-```
-
-Real AXL:
+## Run With Everything Enabled
 
 ```bash
 AXL_MODE=real \
@@ -89,162 +122,33 @@ AXL_CONFIG_PATH=bin/axl-core/node-config.json \
 AXL_NETWORK=testnet \
 AXL_IDENTITY=node-identity \
 AXL_MCP_FORWARD_URL=http://localhost:8080/mcp/execute \
-npm start
-```
-
-Real 0G upload:
-
-```bash
 ZERO_G_UPLOAD_MODE=real \
 ZERO_G_STORAGE_RPC_URL=https://evmrpc-testnet.0g.ai \
 ZERO_G_STORAGE_INDEXER_URL=https://indexer-storage-testnet-turbo.0g.ai \
-ZERO_G_PRIVATE_KEY=... \
+ZERO_G_PRIVATE_KEY=your_private_key \
+ZERO_G_PAYMENT_RPC_URL=https://evmrpc-testnet.0g.ai \
+ZEROG_API_KEY=your_0g_testnet_router_api_key \
+ZEROG_MODEL=qwen/qwen-2.5-7b-instruct \
+ZEROG_BASE_URL=https://router-api-testnet.integratenetwork.work/v1 \
 npm start
 ```
 
-Hosted gateway API plus frontend:
+Optional frontend:
 
 ```bash
-NODE_NEXUS_ROLE=gateway \
-AXL_MODE=real \
-npm start
 NEXT_PUBLIC_NODE_NEXUS_API_URL=http://localhost:8080 npm run web:dev
 ```
 
-The frontend runs from `web/` and lets non-node users submit tasks through the gateway node. The gateway still sends remote tasks through local AXL; it is not a replacement transport.
+## Operator Output
 
-## API Examples
-
-Health:
-
-```bash
-curl http://localhost:8080/health
-```
-
-Node profile:
-
-```bash
-curl http://localhost:8080/node/profile
-```
-
-AXL status:
-
-```bash
-curl http://localhost:8080/axl/status
-```
-
-Gateway quote:
-
-```bash
-curl -X POST http://localhost:8080/gateway/tasks/quote \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://example.com",
-    "task": "Check local UX and produce a report.",
-    "targetLocations": ["IN"],
-    "selectionMode": "auto",
-    "maxTargets": 1,
-    "reportType": "webops-local-ux"
-  }'
-```
-
-Verify ZeroG payment:
-
-```bash
-curl -X POST http://localhost:8080/gateway/tasks/<taskId>/payment/verify \
-  -H "Content-Type: application/json" \
-  -d '{
-    "paymentIntentId": "<payment-intent-id>",
-    "payerAddress": "0x...",
-    "payments": [
-      { "peerId": "peer-id-1", "txHash": "0x..." },
-      { "peerId": "peer-id-2", "txHash": "0x..." }
-    ]
-  }'
-```
-
-Fresh AXL peer discovery:
-
-```bash
-curl http://localhost:8080/gateway/peers
-```
-
-The gateway does not keep a centralized node registry. `/gateway/peers` probes current AXL topology and calls `node_nexus.profile` on peers at request time. `/gateway/tasks/quote` auto-selects fresh live peers when `targetNodes` is omitted, excludes operators without valid payment config, returns direct-to-node ZeroG payment requirements, and blocks dispatch until every selected node payment verifies successfully. Use `selectionMode: "ai"` to let Qwen select peers through the 0G router; if Qwen credentials are unavailable, the gateway falls back to deterministic live selection.
-
-Run a local WebOps task:
-
-```bash
-curl -X POST http://localhost:8080/mcp/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "taskId": "demo-001",
-    "url": "https://example.com",
-    "task": "Open the site, observe the page from this local node, and capture evidence.",
-    "reportType": "webops-local-ux"
-  }'
-```
-
-Explicit peer dispatch:
-
-```bash
-curl -X POST http://localhost:8080/axl/dispatch \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://example.com",
-    "task": "Check local UX and capture a report.",
-    "targetNodes": ["peer-id-1", "peer-id-2"],
-    "targetLocations": ["IN", "US"],
-    "reportType": "webops-local-ux"
-  }'
-```
-
-In real AXL mode, dispatch uses `POST ${AXL_API_URL}/mcp/{peerId}/node-nexus`. Node Nexus does not fake remote delivery.
-
-Inbound AXL MCP uses:
+When a task completes, the node produces artifacts under:
 
 ```text
-POST /route
-service: node-nexus
-method: node_nexus.execute | node_nexus.profile | node_nexus.report
+artifacts/<taskId>/
 ```
 
-## Artifact Layout
+This typically includes:
 
-```text
-artifacts/
-  <taskId>/
-    metadata.json
-    screenshots/
-      01-final.png
-      step-001.png
-    report.pdf
-  node-metadata.json
-```
-
-`ARTIFACT_RETENTION=keep` is the default. `ARTIFACT_RETENTION=delete_screenshots_after_upload` deletes screenshots after the upload phase.
-
-## Sponsor Alignment
-
-- **Gensyn AXL:** inter-node mesh communication is the required real-mode path.
-- **0G:** PDF reports and metadata are uploaded to 0G Storage in real upload mode.
-
-## Known Limitations
-
-- Qwen JSON can be unstable; the agent normalizes browser-use actions and falls back to a deterministic report summary if report analysis fails.
-- Qwen peer selection is optional and uses only the 0G OpenAI-compatible router.
-- YouTube and complex SPAs can be slow.
-- Real mesh mode requires a real AXL binary and at least one reachable AXL peer.
-- Real 0G upload requires funded 0G credentials.
-
-## Demo Script
-
-1. Start Node A:
-   `AXL_MODE=mock ZERO_G_UPLOAD_MODE=disabled PORT=8080 npm start`
-2. Start Node B from another checkout or terminal with a different port/profile.
-3. Open the web console or call `/gateway/tasks/quote` with no `targetNodes` to auto-select live peers, then pay the returned ZeroG quote before dispatch.
-4. Inspect `artifacts/<taskId>/report.pdf` and `metadata.json`.
-5. Enable `ZERO_G_UPLOAD_MODE=real` with credentials to collect real `0g://...` report URIs.
-
-## Compatibility Notes
-
-The CLI file remains `bin/pookie.js` and the `pookie-node` binary alias remains available to avoid breaking existing scripts. User-facing product text and runtime service names use Node Nexus.
+- `report.pdf`
+- `metadata.json`
+- screenshots captured during execution
